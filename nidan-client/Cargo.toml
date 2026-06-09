@@ -1,15 +1,62 @@
 [package]
 name        = "nidan-client"
-description = "NIDAN — nidan-client (Phase 1+)"
+description = "NIDAN client — décodage vidéo + rendu + inputs"
 version.workspace    = true
 edition.workspace    = true
 authors.workspace    = true
 license.workspace    = true
 repository.workspace = true
 
+[[bin]]
+name = "nidan-client"
+path = "src/main.rs"
+
 [dependencies]
 nidan-proto  = { path = "../nidan-proto" }
 nidan-common = { path = "../nidan-common" }
-tokio        = { workspace = true }
-anyhow       = { workspace = true }
-tracing      = { workspace = true }
+
+# Async
+tokio      = { workspace = true }
+tokio-util = { workspace = true }
+bytes      = { workspace = true }
+
+# Transport QUIC
+quinn          = { workspace = true }
+rustls         = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+# Chiffrement E2E
+chacha20poly1305 = { workspace = true }
+rand             = { workspace = true }
+
+# Sérialisation / proto
+serde      = { workspace = true }
+serde_json = { workspace = true }
+prost      = { workspace = true }
+
+# Logs & erreurs
+anyhow     = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Config & CLI
+config = { workspace = true }
+toml   = { workspace = true }
+clap   = { workspace = true }
+
+# FFmpeg (décodage)
+ffmpeg-sys-next = { version = "7", optional = true }
+
+# Rendu SDL2
+[target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
+sdl2 = { version = "0.37", features = ["ttf", "image"], optional = true }
+
+[features]
+default     = ["sdl2-renderer", "ffmpeg"]
+sdl2-renderer = ["dep:sdl2"]
+ffmpeg        = ["dep:ffmpeg-sys-next"]
+stub          = []   # compile sans SDL2 ni FFmpeg (CI/tests)
+
+[dev-dependencies]
+tokio = { workspace = true }
