@@ -1,0 +1,74 @@
+[package]
+name        = "nidan-server"
+description = "NIDAN server — capture X11/Windows + encodage vidéo + stream QUIC"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+
+[[bin]]
+name = "nidan-server"
+path = "src/main.rs"
+
+[dependencies]
+nidan-proto  = { path = "../nidan-proto" }
+nidan-common = { path = "../nidan-common" }
+
+# Async
+tokio        = { workspace = true }
+tokio-util   = { workspace = true }
+bytes        = { workspace = true }
+
+# Transport QUIC
+quinn        = { workspace = true }
+rustls       = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+# Chiffrement E2E
+chacha20poly1305 = { workspace = true }
+rand             = { workspace = true }
+
+# Sérialisation
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+prost       = { workspace = true }
+
+# Logs & erreurs
+anyhow       = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Config
+config = { workspace = true }
+toml   = { workspace = true }
+
+# FFmpeg bindings (encodage vidéo)
+ffmpeg-sys-next = { version = "7", optional = true }
+
+# X11 capture (Linux)
+[target.'cfg(target_os = "linux")'.dependencies]
+xcb          = { version = "1.3", features = ["xdamage", "xshm", "xfixes", "randr"], optional = true }
+x11          = { version = "2.21", features = ["xlib"], optional = true }
+
+# Windows capture
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Direct3D11",
+    "Win32_System_Threading",
+], optional = true }
+
+[features]
+default    = ["x11-capture", "ffmpeg"]
+x11-capture = ["dep:xcb", "dep:x11"]
+ffmpeg      = ["dep:ffmpeg-sys-next"]
+windows-capture = ["dep:windows"]
+# Mode stub : compile sans FFmpeg ni X11 (CI, tests unitaires)
+stub        = []
+
+[dev-dependencies]
+tokio = { workspace = true }
+clap     = { workspace = true }

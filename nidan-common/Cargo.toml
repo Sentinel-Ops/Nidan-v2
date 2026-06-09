@@ -1,0 +1,28 @@
+[package]
+name        = "nidan-common"
+description = "Types partagés, config et utilitaires NIDAN"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+
+[dependencies]
+nidan-proto = { path = "../nidan-proto" }
+
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+tracing-subscriber = { workspace = true }
+config      = { workspace = true }
+toml        = { workspace = true }
+bytes       = { workspace = true }
+
+# Crypto (dérivation de clés de session)
+hkdf             = { workspace = true }
+sha2             = { workspace = true }
+chacha20poly1305 = { workspace = true }
+rand             = { workspace = true }
+zeroize  = { version = "1", features = ["derive"] }

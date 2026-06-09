@@ -1,0 +1,71 @@
+[workspace]
+members = [
+    "nidan-proto",
+    "nidan-common",
+    "nidan-server",
+    "nidan-client",
+    "nidan-broker",
+    "nidan-audit",
+]
+resolver = "2"
+
+[workspace.package]
+version     = "0.1.0"
+edition     = "2021"
+authors     = ["NIDAN Project Team"]
+license     = "GPL-3.0"
+repository  = "https://github.com/your-org/nidan"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Proto / sérialisation
+prost          = "0.12"
+prost-types    = "0.12"
+tonic          = { version = "0.11", features = ["transport", "tls"] }
+tonic-build    = "0.11"
+
+# Async runtime
+tokio          = { version = "1", features = ["full"] }
+tokio-util     = { version = "0.7", features = ["codec"] }
+
+# Transport QUIC
+quinn          = "0.11"
+rustls         = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+
+# Chiffrement
+chacha20poly1305 = "0.10"
+hkdf             = "0.12"
+sha2             = "0.10"
+hmac             = "0.12"
+rand             = "0.8"
+
+# Sérialisation
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+bytes       = "1"
+
+# Erreurs & logs
+anyhow       = "1"
+thiserror    = "1"
+tracing      = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Config
+config = "0.14"
+toml   = "0.8"
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"
+
+[profile.dev]
+opt-level = 1
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# CancellationToken
+tokio-util = { version = "0.7", features = ["rt", "sync"] }

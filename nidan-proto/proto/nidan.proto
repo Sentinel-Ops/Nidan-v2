@@ -1,0 +1,515 @@
+// nidan.proto — Protocol NIDAN v1
+// Définit tous les messages échangés entre client, serveur et broker.
+//
+// Convention de nommage :
+//   - Messages envoyés par le client  : Client*
+//   - Messages envoyés par le serveur : Server*
+//   - Messages du broker              : Broker*
+//   - Messages bidirectionnels        : préfixe fonctionnel
+
+syntax = "proto3";
+package nidan.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Codecs vidéo supportés
+enum VideoCodec {
+    VIDEO_CODEC_UNSPECIFIED = 0;
+    VIDEO_CODEC_H264        = 1;
+    VIDEO_CODEC_H265        = 2;
+    VIDEO_CODEC_AV1         = 3;
+}
+
+// Format de couleur du flux vidéo
+enum PixelFormat {
+    PIXEL_FORMAT_UNSPECIFIED = 0;
+    PIXEL_FORMAT_YUV420P     = 1;  // Compression standard
+    PIXEL_FORMAT_YUV444P     = 2;  // Meilleure fidélité (texte, UI)
+}
+
+// Types d'événements d'entrée
+enum InputEventType {
+    INPUT_EVENT_UNSPECIFIED   = 0;
+    INPUT_EVENT_KEY_DOWN      = 1;
+    INPUT_EVENT_KEY_UP        = 2;
+    INPUT_EVENT_MOUSE_MOVE    = 3;
+    INPUT_EVENT_MOUSE_DOWN    = 4;
+    INPUT_EVENT_MOUSE_UP      = 5;
+    INPUT_EVENT_MOUSE_SCROLL  = 6;
+    INPUT_EVENT_TOUCH         = 7;
+}
+
+// Boutons souris
+enum MouseButton {
+    MOUSE_BUTTON_UNSPECIFIED = 0;
+    MOUSE_BUTTON_LEFT        = 1;
+    MOUSE_BUTTON_RIGHT       = 2;
+    MOUSE_BUTTON_MIDDLE      = 3;
+    MOUSE_BUTTON_BACK        = 4;
+    MOUSE_BUTTON_FORWARD     = 5;
+}
+
+// Types de contenu clipboard
+enum ClipboardMimeType {
+    CLIPBOARD_MIME_UNSPECIFIED  = 0;
+    CLIPBOARD_MIME_TEXT_PLAIN   = 1;
+    CLIPBOARD_MIME_TEXT_HTML    = 2;
+    CLIPBOARD_MIME_IMAGE_PNG    = 3;
+    CLIPBOARD_MIME_IMAGE_JPEG   = 4;
+    CLIPBOARD_MIME_URI_LIST     = 5;
+}
+
+// Direction du transfert clipboard
+enum ClipboardDirection {
+    CLIPBOARD_DIR_UNSPECIFIED         = 0;
+    CLIPBOARD_DIR_CLIENT_TO_SERVER    = 1;
+    CLIPBOARD_DIR_SERVER_TO_CLIENT    = 2;
+}
+
+// Résultat d'une opération d'authentification
+enum AuthResult {
+    AUTH_RESULT_UNSPECIFIED = 0;
+    AUTH_RESULT_SUCCESS     = 1;
+    AUTH_RESULT_FAILURE     = 2;
+    AUTH_RESULT_MFA_NEEDED  = 3;
+    AUTH_RESULT_EXPIRED     = 4;
+}
+
+// Méthodes d'authentification supportées
+enum AuthMethod {
+    AUTH_METHOD_UNSPECIFIED = 0;
+    AUTH_METHOD_MTLS        = 1;
+    AUTH_METHOD_KERBEROS    = 2;
+    AUTH_METHOD_OIDC        = 3;
+    AUTH_METHOD_SAML        = 4;
+}
+
+// Sévérité des événements d'audit
+enum AuditSeverity {
+    AUDIT_SEVERITY_UNSPECIFIED = 0;
+    AUDIT_SEVERITY_DEBUG       = 1;
+    AUDIT_SEVERITY_INFO        = 2;
+    AUDIT_SEVERITY_WARNING     = 3;
+    AUDIT_SEVERITY_ERROR       = 4;
+    AUDIT_SEVERITY_CRITICAL    = 5;
+}
+
+// Types d'événements d'audit
+enum AuditEventType {
+    AUDIT_EVENT_UNSPECIFIED          = 0;
+    AUDIT_EVENT_SESSION_START        = 1;
+    AUDIT_EVENT_SESSION_END          = 2;
+    AUDIT_EVENT_AUTH_SUCCESS         = 3;
+    AUDIT_EVENT_AUTH_FAILURE         = 4;
+    AUDIT_EVENT_CLIPBOARD_TRANSFER   = 5;
+    AUDIT_EVENT_CLIPBOARD_BLOCKED    = 6;
+    AUDIT_EVENT_INPUT_ANOMALY        = 7;
+    AUDIT_EVENT_RESOLUTION_CHANGE    = 8;
+    AUDIT_EVENT_VM_ASSIGNED          = 9;
+    AUDIT_EVENT_VM_RELEASED          = 10;
+    AUDIT_EVENT_POLICY_VIOLATION     = 11;
+    AUDIT_EVENT_STREAM_INTERRUPTED   = 12;
+}
+
+// État d'une session
+enum SessionState {
+    SESSION_STATE_UNSPECIFIED  = 0;
+    SESSION_STATE_INIT         = 1;
+    SESSION_STATE_AUTH         = 2;
+    SESSION_STATE_ACTIVE       = 3;
+    SESSION_STATE_PAUSED       = 4;
+    SESSION_STATE_CLOSING      = 5;
+    SESSION_STATE_CLOSED       = 6;
+    SESSION_STATE_ERROR        = 7;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TYPES COMMUNS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Résolution d'écran
+message Resolution {
+    uint32 width  = 1;
+    uint32 height = 2;
+    uint32 dpi    = 3;  // Points par pouce (défaut: 96)
+}
+
+// Identifiant d'un moniteur
+message MonitorId {
+    uint32 index = 1;  // Index local (0-based)
+    string name  = 2;  // Nom display (ex: "DP-1", "HDMI-2")
+}
+
+// Configuration d'un moniteur
+message MonitorConfig {
+    MonitorId  id         = 1;
+    Resolution resolution = 2;
+    int32      x_offset   = 3;  // Position dans l'espace multi-moniteur
+    int32      y_offset   = 4;
+    bool       primary    = 5;
+    float      refresh_hz = 6;
+}
+
+// Capacités d'encodage du serveur
+message EncoderCapabilities {
+    repeated VideoCodec codecs          = 1;
+    repeated PixelFormat pixel_formats  = 2;
+    bool     hardware_accel             = 3;  // NVENC / VAAPI / DXGI
+    string   hw_device                  = 4;  // ex: "/dev/dri/renderD128"
+    uint32   max_fps                    = 5;
+    uint32   max_bitrate_kbps           = 6;
+}
+
+// Capacités de décodage du client
+message DecoderCapabilities {
+    repeated VideoCodec codecs         = 1;
+    repeated PixelFormat pixel_formats = 2;
+    bool     hardware_accel            = 3;
+    repeated MonitorConfig monitors    = 4;  // Moniteurs disponibles côté client
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION INIT — Handshake initial (Client → Broker)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Demande d'ouverture de session envoyée par le client au broker
+message ClientSessionRequest {
+    string              client_version     = 1;  // Version du client NIDAN
+    AuthMethod          auth_method        = 2;
+    bytes               auth_token         = 3;  // Token Kerberos / JWT OIDC / cert fingerprint
+    DecoderCapabilities decoder_caps       = 4;
+    repeated MonitorConfig requested_layout = 5; // Topologie désirée
+    string              preferred_vm_tag   = 6;  // Optionnel : tag de VM préférée
+    string              session_label      = 7;  // Label lisible (ex: "navigateur-sensible")
+    bytes               client_nonce       = 8;  // 32 bytes aléatoires pour dérivation clé E2E
+}
+
+// Réponse du broker à la demande de session
+message BrokerSessionResponse {
+    AuthResult          auth_result        = 1;
+    string              session_id         = 2;  // UUID v4, identifiant unique de session
+    string              vm_id              = 3;  // Identifiant de la VM assignée
+    string              server_address     = 4;  // Adresse QUIC du serveur (host:port)
+    bytes               session_token      = 5;  // Token court-terme pour auth server
+    bytes               server_nonce       = 6;  // 32 bytes serveur pour dérivation clé E2E
+    bytes               server_public_key  = 7;  // Clé publique X25519 pour ECDH E2E
+    google.protobuf.Timestamp expires_at   = 8;
+    string              error_message      = 9;  // Rempli si auth_result != SUCCESS
+}
+
+// Handshake client → serveur après obtention du token broker
+message ClientServerHandshake {
+    string              session_id         = 1;
+    bytes               session_token      = 2;
+    bytes               client_public_key  = 3;  // Clé publique X25519 pour ECDH E2E
+    VideoCodec          preferred_codec    = 4;
+    PixelFormat         preferred_format   = 5;
+    uint32              target_fps         = 6;   // 0 = max disponible
+    uint32              target_bitrate_kbps = 7;  // 0 = adaptatif
+    bool                audio_enabled      = 8;
+    bool                seamless_mode      = 9;
+    repeated MonitorConfig client_monitors = 10;
+}
+
+// Confirmation du serveur
+message ServerHandshakeAck {
+    bool                accepted           = 1;
+    EncoderCapabilities encoder_caps       = 2;
+    VideoCodec          selected_codec     = 3;
+    PixelFormat         selected_format    = 4;
+    repeated MonitorConfig server_monitors = 5;  // Layout moniteurs côté VM
+    SessionState        state              = 6;
+    string              error_message      = 7;
+    uint32              stream_id          = 8;  // ID du stream QUIC principal
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VIDEO STREAM — Flux vidéo chiffré (Serveur → Client)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Une frame vidéo encodée et chiffrée
+message VideoFrame {
+    uint64      frame_seq          = 1;   // Numéro de séquence (monotone)
+    uint32      monitor_index      = 2;   // Moniteur source (0-based)
+    VideoCodec  codec              = 3;
+    PixelFormat pixel_format       = 4;
+    bool        keyframe           = 5;   // IDR frame H.264 / keyframe AV1
+    bytes       encoded_data       = 6;   // Payload chiffré (ChaCha20-Poly1305)
+    bytes       nonce              = 7;   // 12 bytes nonce AEAD
+    uint32      width              = 8;
+    uint32      height             = 9;
+    uint32      pts_ms             = 10;  // Presentation timestamp (ms depuis session_start)
+    uint32      encode_duration_us = 11;  // Durée d'encodage (µs, pour métriques)
+    bytes       damage_hint        = 12;  // Optionnel : rectangle(s) modifié(s) en JSON compact
+}
+
+// Métadonnées de stream (envoyées périodiquement)
+message StreamMetrics {
+    string  session_id         = 1;
+    uint32  monitor_index      = 2;
+    float   fps_actual         = 3;
+    uint32  bitrate_kbps       = 4;
+    uint32  encode_latency_us  = 5;
+    uint32  frames_dropped     = 6;
+    uint32  frames_total       = 7;
+    float   cpu_encode_pct     = 8;
+    bool    hw_accel_active    = 9;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUT EVENTS — Entrées clavier/souris (Client → Serveur)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Un événement d'entrée utilisateur
+message InputEvent {
+    uint64          seq         = 1;  // Numéro de séquence pour dé-duplication
+    InputEventType  event_type  = 2;
+    uint32          timestamp_ms = 3;
+
+    oneof event {
+        KeyEvent    key         = 4;
+        MouseEvent  mouse       = 5;
+        TouchEvent  touch       = 6;
+    }
+}
+
+// Événement clavier
+message KeyEvent {
+    uint32  keycode     = 1;  // X11 KeySym / Windows VK code
+    uint32  scancode    = 2;  // Scancode physique (xkb_scancode)
+    bool    shift       = 3;
+    bool    ctrl        = 4;
+    bool    alt         = 5;
+    bool    meta        = 6;  // Super/Windows key
+    bool    repeat      = 7;  // Auto-repeat
+}
+
+// Événement souris
+message MouseEvent {
+    MouseButton button      = 1;
+    float       x           = 2;  // Position normalisée [0.0, 1.0] dans le moniteur
+    float       y           = 3;
+    float       scroll_dx   = 4;  // Delta scroll horizontal
+    float       scroll_dy   = 5;  // Delta scroll vertical
+    uint32      monitor_idx = 6;  // Moniteur cible
+}
+
+// Événement tactile
+message TouchEvent {
+    uint32  touch_id    = 1;  // Identifiant du doigt
+    float   x           = 2;
+    float   y           = 3;
+    float   pressure    = 4;  // [0.0, 1.0]
+    bool    contact     = 5;  // true = contact, false = lever
+}
+
+// Batch d'événements d'entrée (optimisation latence)
+message InputBatch {
+    repeated InputEvent events = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLIPBOARD — Transfert clipboard filtré (bidirectionnel)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Demande de transfert clipboard
+message ClipboardTransferRequest {
+    string              session_id  = 1;
+    ClipboardDirection  direction   = 2;
+    ClipboardMimeType   mime_type   = 3;
+    bytes               content     = 4;  // Contenu brut
+    uint64              content_hash = 5; // SHA-256 tronqué (8 bytes) pour audit
+    uint32              size_bytes  = 6;
+}
+
+// Réponse au transfert clipboard (peut être bloqué par politique)
+message ClipboardTransferResponse {
+    bool    allowed         = 1;
+    string  reason          = 2;  // Raison si bloqué (ex: "pattern:pem_key")
+    bytes   sanitized_content = 3; // Contenu éventuellement sanitisé
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONTROL — Messages de contrôle de session (bidirectionnels)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Demande de changement de résolution (Client → Serveur)
+message ResizeRequest {
+    uint32 monitor_index = 1;
+    uint32 new_width     = 2;
+    uint32 new_height    = 3;
+    uint32 new_dpi       = 4;
+}
+
+// Confirmation de resize (Serveur → Client)
+message ResizeAck {
+    uint32 monitor_index    = 1;
+    uint32 applied_width    = 2;
+    uint32 applied_height   = 3;
+    bool   success          = 4;
+    string error_message    = 5;
+}
+
+// Demande de changement de codec/bitrate
+message StreamQualityRequest {
+    VideoCodec  new_codec          = 1;  // VIDEO_CODEC_UNSPECIFIED = pas de changement
+    uint32      new_bitrate_kbps   = 2;  // 0 = pas de changement
+    uint32      new_fps            = 3;  // 0 = pas de changement
+    PixelFormat new_pixel_format   = 4;
+}
+
+// Keepalive / Ping
+message Ping {
+    uint64  seq         = 1;
+    uint64  timestamp_us = 2;
+}
+
+message Pong {
+    uint64  seq         = 1;
+    uint64  echo_timestamp_us = 2;
+    uint64  server_timestamp_us = 3;
+}
+
+// Demande de fermeture de session
+message SessionCloseRequest {
+    string  session_id  = 1;
+    string  reason      = 2;
+    bool    graceful    = 3;
+}
+
+// Message de contrôle générique (enveloppe)
+message ControlMessage {
+    string  session_id  = 1;
+    uint64  seq         = 2;
+
+    oneof payload {
+        ResizeRequest        resize_req    = 10;
+        ResizeAck            resize_ack    = 11;
+        StreamQualityRequest quality_req   = 12;
+        Ping                 ping          = 13;
+        Pong                 pong          = 14;
+        SessionCloseRequest  close_req     = 15;
+        StreamMetrics        metrics       = 16;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUDIO — Stream audio optionnel (Serveur → Client)
+// ─────────────────────────────────────────────────────────────────────────────
+
+message AudioFrame {
+    uint64  frame_seq       = 1;
+    bytes   opus_data       = 2;   // Frame Opus encodée
+    bytes   nonce           = 3;   // 12 bytes pour ChaCha20-Poly1305
+    uint32  pts_ms          = 4;
+    uint32  sample_rate     = 5;   // 48000 Hz standard
+    uint32  channels        = 6;   // 1 (mono) ou 2 (stéréo)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUDIT — Événements d'audit (vers nidan-audit)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Un événement d'audit horodaté
+message AuditEvent {
+    string                      event_id    = 1;   // UUID v4
+    AuditEventType              event_type  = 2;
+    AuditSeverity               severity    = 3;
+    string                      session_id  = 4;
+    string                      user_id     = 5;   // Identité authentifiée
+    string                      vm_id       = 6;
+    string                      client_ip   = 7;
+    google.protobuf.Timestamp   timestamp   = 8;
+    string                      description = 9;   // Message lisible
+
+    // Données contextuelles selon le type d'événement
+    oneof context {
+        AuthEventContext        auth        = 20;
+        ClipboardEventContext   clipboard   = 21;
+        ResolutionEventContext  resolution  = 22;
+        PolicyEventContext      policy      = 23;
+        StreamEventContext      stream      = 24;
+    }
+}
+
+message AuthEventContext {
+    AuthMethod  method          = 1;
+    AuthResult  result          = 2;
+    string      identity_hint   = 3;   // Ex: username partiel, realm Kerberos
+    string      failure_reason  = 4;
+}
+
+message ClipboardEventContext {
+    ClipboardDirection  direction   = 1;
+    ClipboardMimeType   mime_type   = 2;
+    uint32              size_bytes  = 3;
+    uint64              content_hash = 4;  // SHA-256 tronqué
+    bool                blocked     = 5;
+    string              block_reason = 6;
+}
+
+message ResolutionEventContext {
+    uint32  monitor_index   = 1;
+    uint32  old_width       = 2;
+    uint32  old_height      = 3;
+    uint32  new_width       = 4;
+    uint32  new_height      = 5;
+}
+
+message PolicyEventContext {
+    string  policy_name     = 1;
+    string  rule_id         = 2;
+    string  triggered_by    = 3;
+}
+
+message StreamEventContext {
+    uint32  monitor_index   = 1;
+    string  interrupt_reason = 2;
+    uint32  frames_lost     = 3;
+}
+
+// Batch d'événements d'audit (envoi groupé)
+message AuditBatch {
+    repeated AuditEvent events = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BROKER ADMIN API — Gestion du pool de VMs
+// ─────────────────────────────────────────────────────────────────────────────
+
+// État d'une VM dans le pool
+message VmStatus {
+    string          vm_id           = 1;
+    string          vm_tag          = 2;
+    bool            available       = 3;
+    string          current_session = 4;   // Vide si disponible
+    string          host            = 5;
+    uint32          port            = 6;
+    uint32          cpu_pct         = 7;
+    uint32          mem_mb          = 8;
+    google.protobuf.Timestamp last_used = 9;
+}
+
+// État global du pool
+message PoolStatus {
+    repeated VmStatus   vms             = 1;
+    uint32              total           = 2;
+    uint32              available       = 3;
+    uint32              active_sessions = 4;
+}
+
+// Demande de révocation de session (admin)
+message RevokeSessionRequest {
+    string  session_id  = 1;
+    string  reason      = 2;
+    string  admin_id    = 3;
+}
+
+message RevokeSessionResponse {
+    bool    success     = 1;
+    string  error       = 2;
+}

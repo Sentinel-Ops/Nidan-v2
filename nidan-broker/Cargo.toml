@@ -1,0 +1,15 @@
+[package]
+name        = "nidan-broker"
+description = "NIDAN — nidan-broker (Phase 1+)"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+
+[dependencies]
+nidan-proto  = { path = "../nidan-proto" }
+nidan-common = { path = "../nidan-common" }
+tokio        = { workspace = true }
+anyhow       = { workspace = true }
+tracing      = { workspace = true }

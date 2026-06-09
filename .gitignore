@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+.env
+*.pem
+*.key
+*.crt
+*.p12
+nidan.toml
+/certs/
+/sessions/
+Cargo.lock.bak

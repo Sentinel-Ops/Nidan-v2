@@ -1,0 +1,20 @@
+[package]
+name        = "nidan-proto"
+description = "Protocol buffer definitions for NIDAN"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+
+[dependencies]
+prost       = { workspace = true }
+prost-types = { workspace = true }
+bytes       = { workspace = true }
+serde       = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+
+[features]
+default = []
