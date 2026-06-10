@@ -1,0 +1,31 @@
+# =============================================================================
+# NIDAN Server — Configuration de référence (VM isolée)
+# Copier vers /etc/nidan-server.toml
+# =============================================================================
+
+[network]
+bind_addr            = "0.0.0.0:7444"
+session_timeout_secs = 3600
+max_connections      = 1       # Une session par VM
+
+[tls]
+ca_cert = "/etc/nidan/certs/ca.crt"
+cert    = "/etc/nidan/certs/server.crt"
+key     = "/etc/nidan/certs/server.key"
+
+[capture]
+display_number      = 100      # DISPLAY=:100
+use_xshm            = true
+use_xdamage         = true
+capture_queue_depth = 4
+
+[video]
+codec               = "h264"
+max_fps             = 30
+target_bitrate_kbps = 0        # 0 = CRF adaptatif
+pixel_format        = "yuv420p"
+hardware_accel      = true
+
+[security]
+seccomp_enabled = true
+e2e_encryption  = true

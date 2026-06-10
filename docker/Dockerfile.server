@@ -1,0 +1,51 @@
+# ── Stage 1 : Build ───────────────────────────────────────────────────────────
+FROM rust:1.75-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y \
+    protobuf-compiler \
+    libssl-dev \
+    pkg-config \
+    libx11-dev \
+    libxcb1-dev \
+    libxcb-damage0-dev \
+    libxcb-shm0-dev \
+    libxcb-randr0-dev \
+    libxfixes-dev \
+    libavcodec-dev \
+    libavformat-dev \
+    libavutil-dev \
+    libswscale-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+RUN cargo build --release -p nidan-server --features nidan-server/full
+
+# ── Stage 2 : Runtime ─────────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    libx11-6 \
+    libxcb1 \
+    libxcb-damage0 \
+    libxcb-shm0 \
+    libavcodec60 \
+    libavutil58 \
+    libswscale7 \
+    xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -r -s /bin/false -u 1000 nidan
+RUN mkdir -p /etc/nidan/certs && chown -R nidan:nidan /etc/nidan
+
+COPY --from=builder /build/target/release/nidan-server /usr/local/bin/
+COPY config/nidan-server.toml /etc/nidan-server.toml
+COPY docker/entrypoint-server.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 7444/udp
+
+ENTRYPOINT ["/entrypoint.sh"]

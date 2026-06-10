@@ -1,0 +1,46 @@
+# =============================================================================
+# NIDAN Client — Configuration de référence
+# Copier vers /etc/nidan-client.toml ou ~/.config/nidan/client.toml
+# =============================================================================
+
+[network]
+broker_addr          = "broker.interne.fr:7443"
+connect_timeout_secs = 10
+auto_reconnect       = true
+reconnect_delay_secs = 3
+
+[tls]
+ca_cert = "/etc/nidan/certs/ca.crt"
+cert    = "/etc/nidan/certs/client.crt"
+key     = "/etc/nidan/certs/client.key"
+
+[video]
+preferred_codec     = "h264"
+max_fps             = 30
+target_bitrate_kbps = 0
+hardware_decode     = true
+decode_buffer_size  = 4
+
+[display]
+fullscreen    = false
+seamless      = false
+scaling       = "fit"
+window_title  = "NIDAN — Bureau distant sécurisé"
+
+[input]
+capture_system_shortcuts = false
+mouse_sensitivity        = 1.0
+touch_enabled            = false
+escape_combo             = "Ctrl+Alt+F"
+
+[clipboard]
+allow_client_to_server = true
+allow_server_to_client = true
+max_size_bytes         = 1048576    # 1 MB
+audit_transfers        = true
+# blocked_patterns = ["-----BEGIN.*PRIVATE KEY-----", "\\d{4}[- ]\\d{4}[- ]\\d{4}[- ]\\d{4}"]
+
+[security]
+verify_server_cert = true
+e2e_encryption     = true
+auth_method        = "mtls"

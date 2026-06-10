@@ -10,50 +10,58 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version     = "0.1.0"
-edition     = "2021"
-authors     = ["NIDAN Project Team"]
-license     = "GPL-3.0"
-repository  = "https://github.com/your-org/nidan"
+version      = "0.1.0"
+edition      = "2021"
+authors      = ["NIDAN Project Team"]
+license      = "GPL-3.0"
+repository   = "https://github.com/Sentinel-Ops/Nidan"
 rust-version = "1.75"
 
 [workspace.dependencies]
-# Proto / sérialisation
-prost          = "0.12"
-prost-types    = "0.12"
-tonic          = { version = "0.11", features = ["transport", "tls"] }
-tonic-build    = "0.11"
+# Proto
+prost       = "0.12"
+prost-types = "0.12"
+tonic       = { version = "0.11", features = ["transport", "tls"] }
+tonic-build = "0.11"
 
-# Async runtime
-tokio          = { version = "1", features = ["full"] }
-tokio-util     = { version = "0.7", features = ["codec"] }
+# Async
+tokio      = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
-# Transport QUIC
+# QUIC
 quinn          = "0.11"
 rustls         = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
 
-# Chiffrement
+# Crypto
 chacha20poly1305 = "0.10"
 hkdf             = "0.12"
 sha2             = "0.10"
 hmac             = "0.12"
 rand             = "0.8"
+hex              = "0.4"
 
 # Sérialisation
-serde       = { version = "1", features = ["derive"] }
-serde_json  = "1"
-bytes       = "1"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes      = "1"
 
 # Erreurs & logs
-anyhow       = "1"
-thiserror    = "1"
-tracing      = "1"
+anyhow             = "1"
+thiserror          = "1"
+tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
-# Config
+# Config & CLI
 config = "0.14"
 toml   = "0.8"
+clap   = { version = "4", features = ["derive"] }
+
+# Divers
+chrono  = { version = "0.4", features = ["serde"] }
+uuid    = { version = "1", features = ["v4"] }
+dashmap = "5"
+zeroize = { version = "1", features = ["derive"] }
 
 [profile.release]
 opt-level     = 3
@@ -63,9 +71,3 @@ strip         = "symbols"
 
 [profile.dev]
 opt-level = 1
-
-# CLI
-clap = { version = "4", features = ["derive"] }
-
-# CancellationToken
-tokio-util = { version = "0.7", features = ["rt", "sync"] }

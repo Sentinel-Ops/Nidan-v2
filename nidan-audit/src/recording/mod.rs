@@ -27,7 +27,7 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
-use nidan_proto::v1::VideoFrame;
+use nidan_proto::VideoFrame;
 
 /// Métadonnées d'une session enregistrée
 #[derive(Debug, Clone)]

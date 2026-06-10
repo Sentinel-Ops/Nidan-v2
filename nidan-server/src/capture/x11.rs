@@ -124,7 +124,7 @@ impl Capturer for X11Capturer {
         self: Arc<Self>,
         tx: mpsc::Sender<RawFrame>,
         fps_limit: u32,
-        shutdown: tokio::sync::CancellationToken,
+        shutdown: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<Result<()>> {
         let capturer = self.clone();
 
@@ -133,10 +133,6 @@ impl Capturer for X11Capturer {
         tokio::task::spawn_blocking(move || {
             capturer.capture_loop_blocking(tx, fps_limit, shutdown)
         })
-        .map(|res| res.unwrap_or_else(|e| Err(anyhow::anyhow!("panic dans le capturer: {}", e))))
-        // Note: spawn_blocking retourne JoinHandle<T>, on adapte
-        // En pratique on utilise un wrapper tokio::spawn + channel
-        // (voir la vraie implémentation ci-dessous)
     }
 }
 
@@ -146,7 +142,7 @@ impl X11Capturer {
         &self,
         tx: mpsc::Sender<RawFrame>,
         fps_limit: u32,
-        shutdown: tokio::sync::CancellationToken,
+        shutdown: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
         #[cfg(all(feature = "x11-capture", not(feature = "stub")))]
         {

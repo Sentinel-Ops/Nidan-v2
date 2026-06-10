@@ -1,0 +1,22 @@
+FROM rust:1.75-slim-bookworm AS builder
+RUN apt-get update && apt-get install -y \
+    protobuf-compiler libssl-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY . .
+RUN cargo build --release -p nidan-audit
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd -r -s /bin/false -u 1000 nidan
+RUN mkdir -p /var/lib/nidan/sessions /var/lib/nidan/events \
+    && chown -R nidan:nidan /var/lib/nidan
+COPY --from=builder /build/target/release/nidan-audit /usr/local/bin/
+COPY config/nidan-audit.toml /etc/nidan-audit.toml
+USER nidan
+EXPOSE 9090/tcp
+HEALTHCHECK --interval=30s --timeout=5s \
+    CMD wget -qO- http://localhost:9090/health || exit 1
+ENTRYPOINT ["/usr/local/bin/nidan-audit"]
+CMD ["--config", "/etc/nidan-audit.toml"]

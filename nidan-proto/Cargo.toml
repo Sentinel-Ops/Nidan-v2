@@ -1,6 +1,6 @@
 [package]
 name        = "nidan-proto"
-description = "Protocol buffer definitions for NIDAN"
+description = "Types du protocole NIDAN"
 version.workspace    = true
 edition.workspace    = true
 authors.workspace    = true
@@ -8,13 +8,8 @@ license.workspace    = true
 repository.workspace = true
 
 [dependencies]
-prost       = { workspace = true }
-prost-types = { workspace = true }
-bytes       = { workspace = true }
 serde       = { workspace = true }
-
-[build-dependencies]
-tonic-build = { workspace = true }
-
-[features]
-default = []
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }
+thiserror   = { workspace = true }
+bytes       = { workspace = true }

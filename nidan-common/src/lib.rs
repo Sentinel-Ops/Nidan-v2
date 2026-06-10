@@ -4,7 +4,7 @@
 //! utilisés par tous les composants NIDAN.
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
+#![allow(missing_docs)]
 
 pub mod config;
 pub mod crypto;

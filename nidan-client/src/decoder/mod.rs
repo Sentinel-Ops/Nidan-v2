@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use nidan_common::crypto::StreamCipher;
-use nidan_proto::v1::{VideoCodec, VideoFrame};
+use nidan_proto::{VideoCodec, VideoFrame};
 
 pub mod ffmpeg;
 

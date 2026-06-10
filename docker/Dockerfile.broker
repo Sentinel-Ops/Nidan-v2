@@ -1,0 +1,38 @@
+# ── Stage 1 : Build ───────────────────────────────────────────────────────────
+FROM rust:1.75-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y \
+    protobuf-compiler \
+    libssl-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+RUN cargo build --release -p nidan-broker
+
+# ── Stage 2 : Runtime ─────────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Utilisateur non-root
+RUN useradd -r -s /bin/false -u 1000 nidan
+RUN mkdir -p /etc/nidan/certs /var/lib/nidan && chown -R nidan:nidan /var/lib/nidan
+
+COPY --from=builder /build/target/release/nidan-broker /usr/local/bin/
+COPY config/nidan-broker.toml /etc/nidan-broker.toml
+
+USER nidan
+
+EXPOSE 7443/udp 7080/tcp
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+    CMD wget -qO- http://localhost:7080/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/nidan-broker"]
+CMD ["--config", "/etc/nidan-broker.toml"]

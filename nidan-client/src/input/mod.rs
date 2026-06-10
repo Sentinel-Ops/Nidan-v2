@@ -7,9 +7,9 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use nidan_proto::v1::{
-    input_event, InputBatch, InputEvent as ProtoInputEvent,
-    KeyEvent, MouseEvent, MouseButton,
+use nidan_proto::{
+    InputBatch, InputEvent as ProtoInputEvent,
+    InputEventPayload, KeyEvent, MouseEvent,
 };
 
 /// Événement d'entrée interne (type-safe, avant conversion proto)
@@ -56,12 +56,11 @@ pub enum InputEvent {
 impl InputEvent {
     /// Convertit en message proto `InputEvent`
     pub fn to_proto(&self, seq: u64) -> Option<ProtoInputEvent> {
-        use nidan_proto::v1::input_event_type::*;
-
+        
         let (event_type, event) = match self {
             Self::KeyDown { keycode, scancode, shift, ctrl, alt, meta, repeat } => (
-                InputEventType::KeyDown as i32,
-                input_event::Event::Key(KeyEvent {
+                1i32,
+                nidan_proto::InputEventPayload::Key(KeyEvent {
                     keycode:  *keycode,
                     scancode: *scancode,
                     shift:    *shift,
@@ -72,40 +71,40 @@ impl InputEvent {
                 }),
             ),
             Self::KeyUp { keycode, scancode } => (
-                InputEventType::KeyUp as i32,
-                input_event::Event::Key(KeyEvent {
+                2i32,
+                nidan_proto::InputEventPayload::Key(KeyEvent {
                     keycode:  *keycode,
                     scancode: *scancode,
                     ..Default::default()
                 }),
             ),
             Self::MouseMove { x, y, monitor } => (
-                InputEventType::MouseMove as i32,
-                input_event::Event::Mouse(MouseEvent {
+                3i32,
+                nidan_proto::InputEventPayload::Mouse(MouseEvent {
                     x: *x, y: *y,
                     monitor_idx: *monitor,
                     ..Default::default()
                 }),
             ),
             Self::MouseDown { button, x, y } => (
-                InputEventType::MouseDown as i32,
-                input_event::Event::Mouse(MouseEvent {
+                4i32,
+                nidan_proto::InputEventPayload::Mouse(MouseEvent {
                     button: *button as i32,
                     x: *x, y: *y,
                     ..Default::default()
                 }),
             ),
             Self::MouseUp { button, x, y } => (
-                InputEventType::MouseUp as i32,
-                input_event::Event::Mouse(MouseEvent {
+                5i32,
+                nidan_proto::InputEventPayload::Mouse(MouseEvent {
                     button: *button as i32,
                     x: *x, y: *y,
                     ..Default::default()
                 }),
             ),
             Self::MouseScroll { dx, dy } => (
-                InputEventType::MouseScroll as i32,
-                input_event::Event::Mouse(MouseEvent {
+                6i32,
+                nidan_proto::InputEventPayload::Mouse(MouseEvent {
                     scroll_dx: *dx,
                     scroll_dy: *dy,
                     ..Default::default()
@@ -228,7 +227,7 @@ mod tests {
         let proto = ev.to_proto(42).unwrap();
         assert_eq!(proto.seq, 42);
         match proto.event {
-            Some(input_event::Event::Key(k)) => {
+            Some(nidan_proto::InputEventPayload::Key(k)) => {
                 assert_eq!(k.keycode, 65);
                 assert!(k.ctrl);
                 assert!(!k.shift);
@@ -242,7 +241,7 @@ mod tests {
         let ev = InputEvent::MouseMove { x: 0.5, y: 0.75, monitor: 0 };
         let proto = ev.to_proto(1).unwrap();
         match proto.event {
-            Some(input_event::Event::Mouse(m)) => {
+            Some(nidan_proto::InputEventPayload::Mouse(m)) => {
                 assert!((m.x - 0.5).abs() < 0.001);
                 assert!((m.y - 0.75).abs() < 0.001);
             }

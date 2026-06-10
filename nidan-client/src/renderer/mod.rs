@@ -9,7 +9,8 @@
 //! - Gestion des événements fenêtre (resize, focus, iconify)
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
+use std::sync::mpsc;
+use tokio::sync::mpsc as tokio_mpsc;
 use tracing::{debug, info, warn};
 
 use crate::decoder::DecodedFrame;
@@ -138,12 +139,12 @@ pub fn start_renderer(
     initial_height: u32,
 ) -> Result<(
     mpsc::SyncSender<DecodedFrame>,    // frames vers renderer
-    mpsc::Receiver<InputEvent>,         // inputs depuis renderer
+    tokio_mpsc::Receiver<InputEvent>,   // inputs depuis renderer
     tokio::sync::watch::Receiver<RenderMetrics>, // métriques
     std::thread::JoinHandle<Result<()>>,
 )> {
     let (frame_tx, frame_rx) = mpsc::sync_channel::<DecodedFrame>(4);
-    let (input_tx, input_rx) = mpsc::channel::<InputEvent>(256);
+    let (input_tx, input_rx) = tokio_mpsc::channel::<InputEvent>(256);
     let (metrics_tx, metrics_rx) = tokio::sync::watch::channel(RenderMetrics::default());
 
     let thread = std::thread::spawn(move || {

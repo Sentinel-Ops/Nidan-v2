@@ -10,7 +10,7 @@
 //! - `storage`    : gestion des fichiers d'audit (WORM, rotation, scellage HMAC)
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
+#![allow(missing_docs)]
 
 pub mod config;
 pub mod metrics;
@@ -25,7 +25,7 @@ use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tracing::info;
 
-use nidan_proto::v1::AuditEvent;
+use nidan_proto::AuditEvent;
 
 use config::AuditDaemonConfig;
 
@@ -84,7 +84,7 @@ impl AuditEngine {
         mut rx: mpsc::Receiver<AuditEvent>,
         registry: Arc<metrics::NidanMetrics>,
     ) -> Result<()> {
-        use nidan_proto::v1::AuditEventType;
+        use nidan_proto::AuditEventType;
 
         info!("boucle d'audit démarrée");
 

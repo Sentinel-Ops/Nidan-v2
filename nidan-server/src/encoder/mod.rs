@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use nidan_common::crypto::{SessionKey, StreamCipher};
-use nidan_proto::v1::{VideoCodec, VideoFrame};
+use nidan_proto::{VideoCodec, VideoFrame};
 
 use crate::capture::RawFrame;
 
@@ -55,11 +55,11 @@ impl CodecChoice {
         }
     }
 
-    pub fn to_proto(self) -> VideoCodec {
+    pub fn to_proto_i32(self) -> i32 {
         match self {
-            Self::H264 => VideoCodec::H264,
-            Self::H265 => VideoCodec::H265,
-            Self::Av1  => VideoCodec::Av1,
+            Self::H264 => nidan_proto::VideoCodec::H264 as i32,
+            Self::H265 => nidan_proto::VideoCodec::H265 as i32,
+            Self::Av1  => nidan_proto::VideoCodec::Av1  as i32,
         }
     }
 }
@@ -92,7 +92,7 @@ impl EncodedFrame {
         VideoFrame {
             frame_seq: self.seq,
             monitor_index,
-            codec: self.codec.to_proto() as i32,
+            codec: self.codec.to_proto_i32(),
             pixel_format: 1, // YUV420P
             keyframe: self.is_keyframe,
             encoded_data: self.data,
@@ -125,7 +125,7 @@ impl EncoderPipeline {
         self,
         mut rx_raw: mpsc::Receiver<RawFrame>,
         tx_encoded: mpsc::Sender<EncodedFrame>,
-        shutdown: tokio::sync::CancellationToken,
+        shutdown: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<Result<()>> {
         // L'encodage FFmpeg est bloquant → thread dédié
         tokio::task::spawn_blocking(move || {

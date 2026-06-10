@@ -1,0 +1,84 @@
+# =============================================================================
+# NIDAN Broker — Configuration de référence
+# Copier vers /etc/nidan-broker.toml et adapter à l'environnement
+# =============================================================================
+
+# ── Réseau ────────────────────────────────────────────────────────────────────
+[network]
+# Port QUIC exposé aux clients
+quic_bind = "0.0.0.0:7443"
+# API admin — NE PAS exposer sur l'interface publique
+admin_bind = "127.0.0.1:7080"
+# Timeout session inactive (1 heure)
+session_timeout_secs = 3600
+# Sessions simultanées maximum
+max_sessions = 50
+
+# ── TLS / mTLS ────────────────────────────────────────────────────────────────
+[tls]
+ca_cert = "/etc/nidan/certs/ca.crt"
+cert    = "/etc/nidan/certs/broker.crt"
+key     = "/etc/nidan/certs/broker.key"
+
+# ── Authentification ──────────────────────────────────────────────────────────
+[auth]
+# Méthodes activées : "mtls", "kerberos", "oidc"
+enabled_methods = ["mtls"]
+# Durée de vie du session token (5 minutes)
+session_token_ttl_secs = 300
+
+[auth.jwt]
+# IMPORTANT : changer cette clé en production (min 32 caractères)
+secret = "CHANGEME_mettre_une_vraie_cle_secrete_ici_32chars"
+issuer = "nidan-broker"
+
+# Décommenter pour activer Kerberos
+# [auth.kerberos]
+# keytab_path       = "/etc/nidan/nidan.keytab"
+# service_principal = "nidan/broker.interne.fr@INTERNE.FR"
+# realm             = "INTERNE.FR"
+
+# Décommenter pour activer OIDC
+# [auth.oidc]
+# issuer_url      = "https://sso.interne.fr"
+# client_id       = "nidan-broker"
+# audience        = "nidan"
+# identity_claim  = "sub"
+
+# ── Pool de VMs ───────────────────────────────────────────────────────────────
+[pool]
+min_available              = 1
+health_check_timeout_secs  = 5
+health_check_interval_secs = 30
+
+# Déclaration des VMs disponibles
+[[pool.static_vms]]
+id   = "vm-001"
+host = "192.168.100.10"
+port = 7444
+tags = ["linux", "x11"]
+
+[[pool.static_vms]]
+id   = "vm-002"
+host = "192.168.100.11"
+port = 7444
+tags = ["linux", "x11"]
+
+# Exemple VM Windows
+# [[pool.static_vms]]
+# id   = "vm-win-001"
+# host = "192.168.100.20"
+# port = 7444
+# tags = ["windows"]
+
+# ── Sécurité ──────────────────────────────────────────────────────────────────
+[security]
+rate_limit_auth    = true
+max_auth_attempts  = 5
+ban_duration_secs  = 300
+audit_all_auth     = true
+
+# ── API Admin ─────────────────────────────────────────────────────────────────
+[admin]
+metrics_enabled = true
+# admin_token = "token-admin-secret"  # optionnel

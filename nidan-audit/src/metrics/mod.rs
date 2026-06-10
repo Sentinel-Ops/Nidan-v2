@@ -29,7 +29,7 @@ use prometheus::{
 };
 use tracing::info;
 
-use nidan_proto::v1::AuditEvent;
+use nidan_proto::AuditEvent;
 
 /// Registre de métriques NIDAN
 pub struct NidanMetrics {
@@ -206,7 +206,7 @@ impl NidanMetrics {
 
     /// Met à jour les métriques depuis un AuditEvent
     pub fn record_audit_event(&self, event: &AuditEvent) {
-        use nidan_proto::v1::AuditEventType;
+        use nidan_proto::AuditEventType;
         match AuditEventType::try_from(event.event_type) {
             Ok(AuditEventType::SessionStart)      => self.session_started(),
             Ok(AuditEventType::SessionEnd)        => self.session_ended(),

@@ -22,12 +22,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use prost::Message as ProstMessage;
+
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use nidan_common::session::SessionId;
-use nidan_proto::v1::{
+use nidan_proto::{
     BrokerSessionResponse, ClientServerHandshake, ClientSessionRequest,
     InputBatch, ServerHandshakeAck, VideoFrame,
 };
@@ -66,43 +66,36 @@ impl NidanClient {
     }
 
     /// Construit la config TLS client (mTLS)
-    fn build_tls_config(config: &ClientConfig) -> Result<rustls::ClientConfig> {
+    fn build_tls_config(config: &ClientConfig) -> Result<quinn::crypto::rustls::QuicClientConfig> {
         use std::fs;
-        use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-        use rustls_pemfile::{certs, pkcs8_private_keys};
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        use rustls_pemfile::{certs as parse_certs, pkcs8_private_keys};
 
-        let cert_pem = fs::read(&config.tls.cert)
-            .with_context(|| format!("lecture cert: {}", config.tls.cert))?;
-        let certs: Vec<CertificateDer> = certs(&mut cert_pem.as_slice())
-            .collect::<Result<Vec<_>, _>>()
-            .context("parsing cert client PEM")?;
+        let cert_pem = fs::read(&config.tls.cert).with_context(|| format!("cert: {}", config.tls.cert))?;
+        let client_certs: Vec<CertificateDer> = parse_certs(&mut cert_pem.as_slice())
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let key_pem = fs::read(&config.tls.key)
-            .with_context(|| format!("lecture clé: {}", config.tls.key))?;
+        let key_pem = fs::read(&config.tls.key).with_context(|| format!("key: {}", config.tls.key))?;
         let mut keys = pkcs8_private_keys(&mut key_pem.as_slice())
-            .collect::<Result<Vec<_>, _>>()
-            .context("parsing clé client PEM")?;
+            .collect::<Result<Vec<_>, _>>()?;
+        if keys.is_empty() { anyhow::bail!("aucune clé PKCS8 dans {}", config.tls.key); }
 
-        if keys.is_empty() { bail!("aucune clé PKCS8 dans {}", config.tls.key); }
-
-        let ca_pem = fs::read(&config.tls.ca_cert)
-            .with_context(|| format!("lecture CA: {}", config.tls.ca_cert))?;
-        let ca_certs: Vec<CertificateDer> = certs(&mut ca_pem.as_slice())
-            .collect::<Result<Vec<_>, _>>()
-            .context("parsing CA PEM")?;
+        let ca_pem = fs::read(&config.tls.ca_cert).with_context(|| format!("ca: {}", config.tls.ca_cert))?;
+        let ca_certs: Vec<CertificateDer> = parse_certs(&mut ca_pem.as_slice())
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut root_store = rustls::RootCertStore::empty();
-        for ca in ca_certs { root_store.add(ca).context("ajout CA")?; }
+        for ca in ca_certs { root_store.add(ca)?; }
 
-        let tls = rustls::ClientConfig::builder()
+        let rustls_cfg = rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_client_auth_cert(
-                certs,
-                rustls::pki_types::PrivateKeyDer::Pkcs8(keys.remove(0))
-            )
-            .context("configuration TLS client mTLS")?;
+                client_certs,
+                PrivateKeyDer::Pkcs8(keys.remove(0))
+            )?;
 
-        Ok(tls)
+        quinn::crypto::rustls::QuicClientConfig::try_from(rustls_cfg)
+            .context("QuicClientConfig")
     }
 
     /// Boucle principale du client avec reconnexion automatique
@@ -312,7 +305,7 @@ impl NidanClient {
         };
 
         // Envoi length-prefixed
-        let data = hs.encode_to_vec();
+        let data = nidan_proto::encode_message(&hs)?;
         tx.write_all(&(data.len() as u32).to_be_bytes()).await
             .context("écriture len handshake")?;
         tx.write_all(&data).await.context("écriture handshake")?;
@@ -328,7 +321,7 @@ impl NidanClient {
         let mut buf = vec![0u8; len];
         rx.read_exact(&mut buf).await.context("lecture payload ACK")?;
 
-        ServerHandshakeAck::decode(buf.as_slice()).context("décodage ACK proto")
+        nidan_proto::decode_message::<ServerHandshakeAck>(&buf).context("décodage ACK")
     }
 
     /// Lit une VideoFrame length-prefixed depuis un stream QUIC
@@ -345,7 +338,7 @@ impl NidanClient {
         let mut buf = vec![0u8; len];
         rx.read_exact(&mut buf).await.context("lecture payload frame")?;
 
-        VideoFrame::decode(buf.as_slice()).context("décodage proto VideoFrame")
+        nidan_proto::decode_message::<VideoFrame>(&buf).context("décodage VideoFrame")
     }
 
     /// Envoie un InputBatch sur le stream de contrôle
@@ -353,7 +346,7 @@ impl NidanClient {
         tx: &mut quinn::SendStream,
         batch: &InputBatch,
     ) -> Result<()> {
-        let data = batch.encode_to_vec();
+        let data = nidan_proto::encode_message(&batch)?;
         tx.write_all(&(data.len() as u32).to_be_bytes()).await?;
         tx.write_all(&data).await?;
         Ok(())

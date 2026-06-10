@@ -31,14 +31,14 @@ async fn main() -> anyhow::Result<()> {
 
     cfg.validate().context("configuration invalide")?;
 
-    let display = std::env::var("NIDAN_DISPLAY")
+    let disp_num = std::env::var("NIDAN_DISPLAY")
         .ok()
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(cfg.capture.display_number);
 
-    info!(bind = %cfg.network.bind_addr, display, codec = %cfg.video.codec, "configuration OK");
+    info!("configuration chargee: bind={}, display={}, codec={}", cfg.network.bind_addr, disp_num, cfg.video.codec);
 
-    let server = stream::QuicServer::new(cfg, display).await
+    let server = stream::QuicServer::new(cfg, disp_num).await
         .context("initialisation serveur QUIC")?;
 
     info!("serveur NIDAN prêt, en attente de connexions");

@@ -21,12 +21,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use prost::Message as ProstMessage;
+
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use nidan_common::session::SessionId;
-use nidan_proto::v1::{
+use nidan_proto::{
     ClientServerHandshake, ServerHandshakeAck, SessionState, VideoFrame,
 };
 
@@ -67,56 +67,48 @@ impl QuicServer {
     }
 
     /// Construit la configuration TLS/QUIC depuis les certificats
-    fn build_tls_config(config: &ServerConfig) -> Result<rustls::ServerConfig> {
+    fn build_tls_config(config: &ServerConfig) -> Result<quinn::crypto::rustls::QuicServerConfig> {
         use std::fs;
         use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-        use rustls_pemfile::{certs, pkcs8_private_keys};
+        use rustls_pemfile::{certs as parse_certs, pkcs8_private_keys};
 
-        // Lecture du certificat serveur
         let cert_pem = fs::read(&config.tls.cert)
             .with_context(|| format!("lecture cert: {}", config.tls.cert))?;
-        let certs: Vec<CertificateDer> = certs(&mut cert_pem.as_slice())
+        let server_certs: Vec<CertificateDer> = parse_certs(&mut cert_pem.as_slice())
             .collect::<Result<Vec<_>, _>>()
             .context("parsing cert PEM")?;
 
-        // Lecture de la clé privée
         let key_pem = fs::read(&config.tls.key)
             .with_context(|| format!("lecture clé: {}", config.tls.key))?;
         let mut keys = pkcs8_private_keys(&mut key_pem.as_slice())
             .collect::<Result<Vec<_>, _>>()
             .context("parsing clé PEM")?;
-
         if keys.is_empty() {
-            anyhow::bail!("aucune clé PKCS8 trouvée dans {}", config.tls.key);
+            anyhow::bail!("aucune clé PKCS8 dans {}", config.tls.key);
         }
 
-        let key = PrivateKeyDer::Pkcs8(keys.remove(0));
-
-        // Lecture du CA pour valider les clients (mTLS)
         let ca_pem = fs::read(&config.tls.ca_cert)
             .with_context(|| format!("lecture CA: {}", config.tls.ca_cert))?;
-        let ca_certs: Vec<CertificateDer> = certs(&mut ca_pem.as_slice())
+        let ca_certs: Vec<CertificateDer> = parse_certs(&mut ca_pem.as_slice())
             .collect::<Result<Vec<_>, _>>()
             .context("parsing CA PEM")?;
 
         let mut root_store = rustls::RootCertStore::empty();
         for ca in ca_certs {
-            root_store.add(ca).context("ajout CA au store")?;
+            root_store.add(ca).context("ajout CA")?;
         }
 
-        // Config mTLS : client certificate required
         let client_verifier = rustls::server::WebPkiClientVerifier::builder(
             Arc::new(root_store)
-        )
-        .build()
-        .context("construction client verifier mTLS")?;
+        ).build().context("client verifier mTLS")?;
 
         let tls = rustls::ServerConfig::builder()
             .with_client_cert_verifier(client_verifier)
-            .with_single_cert(certs, key)
+            .with_single_cert(server_certs, PrivateKeyDer::Pkcs8(keys.remove(0)))
             .context("configuration TLS serveur")?;
 
-        Ok(tls)
+        quinn::crypto::rustls::QuicServerConfig::try_from(tls)
+            .context("QuicServerConfig")
     }
 
     /// Boucle principale : accepte les connexions QUIC
@@ -190,7 +182,7 @@ impl QuicServer {
             accepted: true,
             selected_codec: handshake.preferred_codec,
             selected_format: 1, // YUV420P
-            state: SessionState::SessionStateActive as i32,
+            state: SessionState::Active as i32,
             stream_id: 1,
             ..Default::default()
         };
@@ -220,14 +212,14 @@ impl QuicServer {
         let mut buf = vec![0u8; len];
         rx.read_exact(&mut buf).await.context("lecture payload handshake")?;
 
-        ClientServerHandshake::decode(buf.as_slice())
+        nidan_proto::decode_message::<ClientServerHandshake>(&buf)
             .context("décodage proto ClientServerHandshake")
     }
 
     /// Envoie l'ACK de handshake
     async fn send_ack(conn: &quinn::Connection, ack: &ServerHandshakeAck) -> Result<()> {
         let (mut tx, _rx) = conn.open_bi().await.context("ouverture stream bi pour ACK")?;
-        let data = ack.encode_to_vec();
+        let data = nidan_proto::encode_message(&ack)?;
         let len = (data.len() as u32).to_be_bytes();
         tx.write_all(&len).await.context("écriture longueur ACK")?;
         tx.write_all(&data).await.context("écriture payload ACK")?;
@@ -303,7 +295,7 @@ impl QuicServer {
                         }
                         Some(f) => {
                             let proto_frame = f.into_proto(0);
-                            let data = proto_frame.encode_to_vec();
+                            let data = nidan_proto::encode_message(&proto_frame)?;
                             let len = (data.len() as u32).to_be_bytes();
 
                             // Length-prefixed protobuf sur stream QUIC

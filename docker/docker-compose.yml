@@ -1,0 +1,122 @@
+version: "3.9"
+
+# =============================================================================
+# NIDAN — Stack de développement complète
+# Usage : docker-compose -f docker/docker-compose.yml up
+# =============================================================================
+
+networks:
+  nidan-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.200.0/24
+
+volumes:
+  nidan-certs:
+  nidan-sessions:
+  nidan-events:
+
+services:
+
+  # ── PKI Init (job one-shot) ─────────────────────────────────────────────────
+  pki-init:
+    image: alpine/openssl:latest
+    volumes:
+      - nidan-certs:/certs
+      - ./scripts:/scripts:ro
+    entrypoint: sh -c "
+      if [ ! -f /certs/ca.crt ]; then
+        apk add --no-cache bash &&
+        bash /scripts/pki-init.sh --out-dir /certs --days 365;
+      else
+        echo 'PKI déjà initialisée';
+      fi"
+    networks:
+      - nidan-net
+
+  # ── Broker ──────────────────────────────────────────────────────────────────
+  nidan-broker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.broker
+    depends_on:
+      pki-init:
+        condition: service_completed_successfully
+    environment:
+      - NIDAN_LOG=info
+    volumes:
+      - nidan-certs:/etc/nidan/certs:ro
+      - ./config/nidan-broker.toml:/etc/nidan-broker.toml:ro
+    ports:
+      - "7443:7443/udp"   # QUIC clients
+      - "7080:7080/tcp"   # API admin (exposer avec précaution)
+    networks:
+      nidan-net:
+        ipv4_address: 192.168.200.10
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── Server (VM isolée) ──────────────────────────────────────────────────────
+  nidan-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    depends_on:
+      pki-init:
+        condition: service_completed_successfully
+    environment:
+      - NIDAN_LOG=info
+      - NIDAN_DISPLAY_NUM=100
+    volumes:
+      - nidan-certs:/etc/nidan/certs:ro
+      - ./config/nidan-server.toml:/etc/nidan-server.toml:ro
+    ports:
+      - "7444:7444/udp"   # QUIC (connexion directe dev)
+    networks:
+      nidan-net:
+        ipv4_address: 192.168.200.11
+    restart: unless-stopped
+    # Accès au device DRI pour accélération hardware (optionnel)
+    # devices:
+    #   - /dev/dri/renderD128:/dev/dri/renderD128
+
+  # ── Audit ───────────────────────────────────────────────────────────────────
+  nidan-audit:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.audit
+    depends_on:
+      - nidan-broker
+    environment:
+      - NIDAN_LOG=info
+    volumes:
+      - nidan-sessions:/var/lib/nidan/sessions
+      - nidan-events:/var/lib/nidan/events
+      - ./config/nidan-audit.toml:/etc/nidan-audit.toml:ro
+    ports:
+      - "9090:9090/tcp"   # Prometheus metrics
+    networks:
+      nidan-net:
+        ipv4_address: 192.168.200.12
+    restart: unless-stopped
+
+  # ── Grafana (dashboard métriques) ───────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    depends_on:
+      - nidan-audit
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=nidan_dev
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3000:3000/tcp"
+    networks:
+      - nidan-net
+    volumes:
+      - ./docker/grafana:/etc/grafana/provisioning:ro
+    restart: unless-stopped

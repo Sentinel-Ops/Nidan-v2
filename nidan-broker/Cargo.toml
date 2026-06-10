@@ -1,6 +1,6 @@
 [package]
 name        = "nidan-broker"
-description = "NIDAN broker — authentification, pool VMs, routing QUIC"
+description = "NIDAN broker — auth + pool VMs + routing QUIC"
 version.workspace    = true
 edition.workspace    = true
 authors.workspace    = true
@@ -14,58 +14,29 @@ path = "src/main.rs"
 [dependencies]
 nidan-proto  = { path = "../nidan-proto" }
 nidan-common = { path = "../nidan-common" }
-
-# Async
-tokio      = { workspace = true }
-tokio-util = { workspace = true }
-bytes      = { workspace = true }
-
-# Transport QUIC
-quinn          = { workspace = true }
-rustls         = { workspace = true }
+tokio        = { workspace = true }
+tokio-util   = { workspace = true }
+bytes        = { workspace = true }
+quinn        = { workspace = true }
+rustls       = { workspace = true }
 rustls-pemfile = { workspace = true }
-
-# HTTP API admin (Axum)
-axum            = { version = "0.7", features = ["macros"] }
-axum-extra      = { version = "0.9", features = ["typed-header"] }
-tower           = { version = "0.4" }
-tower-http      = { version = "0.5", features = ["trace", "cors"] }
-hyper           = { version = "1" }
-
-# Auth JWT / OIDC
-jsonwebtoken  = "9"
-base64        = "0.22"
-
-# Chiffrement / crypto
 chacha20poly1305 = { workspace = true }
-rand             = { workspace = true }
-sha2             = { workspace = true }
-hmac             = { workspace = true }
-
-# Sérialisation
-serde       = { workspace = true }
-serde_json  = { workspace = true }
-prost       = { workspace = true }
-
-# Logs & erreurs
-anyhow     = { workspace = true }
-thiserror  = { workspace = true }
-tracing    = { workspace = true }
+rand         = { workspace = true }
+sha2         = { workspace = true }
+hmac         = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+anyhow       = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
 tracing-subscriber = { workspace = true }
-
-# Config & CLI
-config = { workspace = true }
-toml   = { workspace = true }
-clap   = { workspace = true }
-
-# UUID
-uuid = { version = "1", features = ["v4"] }
-
-# Temps
-chrono = { version = "0.4", features = ["serde"] }
-
-# State partagé thread-safe
-dashmap = "5"
-
-[dev-dependencies]
-tokio = { workspace = true }
+config       = { workspace = true }
+toml         = { workspace = true }
+clap         = { workspace = true }
+uuid         = { workspace = true }
+chrono       = { workspace = true }
+dashmap      = { workspace = true }
+axum            = "0.7"
+tower-http      = { version = "0.5", features = ["trace"] }
+jsonwebtoken    = "9"
+base64          = "0.22"

@@ -99,7 +99,7 @@ pub trait Capturer: Send + Sync {
         self: Arc<Self>,
         tx: mpsc::Sender<RawFrame>,
         fps_limit: u32,
-        shutdown: tokio::sync::CancellationToken,
+        shutdown: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<Result<()>>;
 }
 
@@ -111,7 +111,7 @@ pub fn create_capturer(
 ) -> Result<Arc<dyn Capturer>> {
     #[cfg(target_os = "linux")]
     {
-        info!(display = display_number, xshm = use_xshm, xdamage = use_xdamage, "initialisation capturer X11");
+        info!(display_num = display_number, xshm = use_xshm, xdamage = use_xdamage, "initialisation capturer X11");
         let capturer = x11::X11Capturer::new(display_number, use_xshm, use_xdamage)?;
         return Ok(Arc::new(capturer));
     }
@@ -151,7 +151,7 @@ impl Capturer for StubCapturer {
         self: Arc<Self>,
         tx: mpsc::Sender<RawFrame>,
         fps_limit: u32,
-        shutdown: tokio::sync::CancellationToken,
+        shutdown: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<Result<()>> {
         tokio::spawn(async move {
             let interval_ms = 1000u64 / fps_limit.max(1) as u64;

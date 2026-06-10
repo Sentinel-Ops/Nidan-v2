@@ -1,0 +1,26 @@
+# =============================================================================
+# NIDAN Audit — Configuration de référence
+# =============================================================================
+
+[storage]
+session_dir    = "/var/lib/nidan/sessions"
+event_log_dir  = "/var/lib/nidan/events"
+persist_events = true
+retention_days = 90
+max_storage_mb = 10240          # 10 GB max
+# seal_key = "hex_encoded_32_byte_key_ici"
+
+[watermark]
+enabled         = true
+strength        = 2             # 1–4 bits LSB
+interval_frames = 30            # 1 watermark/seconde à 30fps
+
+[metrics]
+bind_addr            = "0.0.0.0:9090"
+update_interval_secs = 15
+
+[recording]
+enabled       = true
+format        = "mkv"
+quality       = 80
+include_audio = false
