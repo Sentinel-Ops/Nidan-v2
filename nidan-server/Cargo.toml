@@ -32,10 +32,12 @@ config       = { workspace = true }
 toml         = { workspace = true }
 clap         = { workspace = true }
 
-# Optionnel : FFmpeg et X11 (désactivés par défaut pour compiler partout)
+# Capture X11 (pur Rust, derrière la feature x11-capture)
+x11rb = { version = "0.13", optional = true, features = ["shm", "randr", "damage"] }
+
 [features]
-default = ["stub"]
-stub    = []
-full    = ["x11-capture", "ffmpeg"]
-x11-capture = []
+default     = ["stub"]
+stub        = []
+full        = ["x11-capture"]
+x11-capture = ["dep:x11rb"]
 ffmpeg      = []

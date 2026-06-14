@@ -1,48 +1,40 @@
-//! Capture d'écran X11 via XShm (shared memory) et XDamage (delta).
+//! Capture d'écran X11.
 //!
-//! ## Stratégie de capture
-//!
-//! ### Mode XShm + XDamage (optimal)
-//! - XDamage notifie les rectangles modifiés → pas de capture si rien n'a changé
-//! - XShm mappe la mémoire du serveur X directement → zéro copie
-//! - CPU minimal, latence minimale
-//!
-//! ### Mode XShm seul (fallback)
-//! - Capture complète à chaque frame via XShmGetImage
-//! - Toujours zéro copie mais pas de delta
-//!
-//! ### Mode basique (dernier recours)
-//! - XGetImage classique → copie kernel→userspace à chaque frame
-//! - Compatible avec tout serveur X, y compris les vieux XVFB
+//! Deux modes :
+//! - **Réel** (feature `x11-capture`) : capture via x11rb (XGetImage)
+//! - **Stub** (par défaut) : frames synthétiques pour tests sans serveur X
 
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use super::{Capturer, CapturerCapabilities, DamageRect, PixelFormat, RawFrame};
+use super::{Capturer, CapturerCapabilities, PixelFormat, RawFrame};
 
-/// Capturer X11 — gère les trois modes de capture
+/// Capturer X11
 pub struct X11Capturer {
     caps: CapturerCapabilities,
     display_number: u32,
+    #[allow(dead_code)]
     use_xshm: bool,
+    #[allow(dead_code)]
     use_xdamage: bool,
 }
 
 impl X11Capturer {
-    /// Crée un nouveau capturer X11.
-    ///
-    /// Détecte automatiquement les extensions disponibles
-    /// et choisit le mode de capture optimal.
+    /// Crée un nouveau capturer X11, détecte les extensions disponibles.
     pub fn new(display_number: u32, use_xshm: bool, use_xdamage: bool) -> Result<Self> {
-        // En mode stub (feature "stub" ou pas de X11 dispo),
-        // on retourne des capacités synthétiques
-        #[cfg(feature = "stub")]
+        #[cfg(feature = "x11-capture")]
         {
-            warn!("X11Capturer en mode stub (feature stub activée)");
-            return Ok(Self {
+            Self::new_real(display_number, use_xshm, use_xdamage)
+        }
+
+        #[cfg(not(feature = "x11-capture"))]
+        {
+            let _ = (use_xshm, use_xdamage);
+            warn!("X11Capturer en mode stub (feature x11-capture désactivée)");
+            Ok(Self {
                 caps: CapturerCapabilities {
                     width: 1920,
                     height: 1080,
@@ -53,65 +45,56 @@ impl X11Capturer {
                 display_number,
                 use_xshm: false,
                 use_xdamage: false,
-            });
+            })
         }
+    }
 
-        // Connexion au serveur X
-        #[cfg(all(feature = "x11-capture", not(feature = "stub")))]
-        {
-            use xcb::Connection;
+    #[cfg(feature = "x11-capture")]
+    fn new_real(display_number: u32, use_xshm: bool, use_xdamage: bool) -> Result<Self> {
+        use x11rb::connection::{Connection, RequestConnection as _};
+        use x11rb::protocol::xproto::ConnectionExt as _;
 
-            let display_str = format!(":{}", display_number);
-            std::env::set_var("DISPLAY", &display_str);
+        let display_str = format!(":{}", display_number);
+        let (conn, screen_num) = x11rb::connect(Some(&display_str))
+            .with_context(|| format!("connexion X11 sur {}", display_str))?;
 
-            let (conn, screen_num) = Connection::connect(Some(&display_str))
-                .with_context(|| format!("connexion X11 sur :{}", display_number))?;
+        let screen = &conn.setup().roots[screen_num];
+        let width = screen.width_in_pixels as u32;
+        let height = screen.height_in_pixels as u32;
+        let root = screen.root;
 
-            let setup = conn.get_setup();
-            let screen = setup.roots().nth(screen_num as usize)
-                .context("écran X11 introuvable")?;
+        let has_xshm = if use_xshm {
+            conn.extension_information(x11rb::protocol::shm::X11_EXTENSION_NAME)
+                .ok().flatten().is_some()
+        } else { false };
 
-            let width  = screen.width_in_pixels() as u32;
-            let height = screen.height_in_pixels() as u32;
+        let has_xdamage = if use_xdamage {
+            conn.extension_information(x11rb::protocol::damage::X11_EXTENSION_NAME)
+                .ok().flatten().is_some()
+        } else { false };
 
-            // Vérification XShm
-            let has_xshm = if use_xshm {
-                conn.extension_data(xcb::xshm::id()).is_some()
-            } else {
-                false
-            };
+        let _geom = conn.get_geometry(root)
+            .context("get_geometry root")?
+            .reply()
+            .context("get_geometry reply")?;
 
-            // Vérification XDamage
-            let has_xdamage = if use_xdamage {
-                conn.extension_data(xcb::xdamage::id()).is_some()
-            } else {
-                false
-            };
+        info!(
+            display = display_number, width, height,
+            xshm = has_xshm, xdamage = has_xdamage,
+            "X11 initialisé (capture réelle)"
+        );
 
-            info!(
-                display   = display_number,
+        Ok(Self {
+            caps: CapturerCapabilities {
                 width, height,
-                xshm      = has_xshm,
-                xdamage   = has_xdamage,
-                "X11 initialisé"
-            );
-
-            return Ok(Self {
-                caps: CapturerCapabilities {
-                    width,
-                    height,
-                    supports_xshm: has_xshm,
-                    supports_xdamage: has_xdamage,
-                    pixel_format: PixelFormat::Bgra8888,
-                },
-                display_number,
-                use_xshm: has_xshm,
-                use_xdamage: has_xdamage,
-            });
-        }
-
-        #[allow(unreachable_code)]
-        bail!("X11 non disponible sur cette plateforme ou compilation")
+                supports_xshm: has_xshm,
+                supports_xdamage: has_xdamage,
+                pixel_format: PixelFormat::Bgra8888,
+            },
+            display_number,
+            use_xshm: has_xshm,
+            use_xdamage: has_xdamage,
+        })
     }
 }
 
@@ -127,9 +110,6 @@ impl Capturer for X11Capturer {
         shutdown: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<Result<()>> {
         let capturer = self.clone();
-
-        // La capture X11 doit tourner dans un thread dédié (non-async)
-        // car xcb n'est pas async. On utilise spawn_blocking.
         tokio::task::spawn_blocking(move || {
             capturer.capture_loop_blocking(tx, fps_limit, shutdown)
         })
@@ -137,223 +117,142 @@ impl Capturer for X11Capturer {
 }
 
 impl X11Capturer {
-    /// Boucle de capture synchrone (s'exécute dans spawn_blocking)
     fn capture_loop_blocking(
         &self,
         tx: mpsc::Sender<RawFrame>,
         fps_limit: u32,
         shutdown: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
-        #[cfg(all(feature = "x11-capture", not(feature = "stub")))]
-        {
-            use xcb::Connection;
-            use std::time::{Duration, Instant};
+        #[cfg(feature = "x11-capture")]
+        { self.capture_loop_real(tx, fps_limit, shutdown) }
 
-            let display_str = format!(":{}", self.display_number);
-            let (conn, screen_num) = Connection::connect(Some(&display_str))
-                .context("reconnexion X11 dans le thread de capture")?;
-
-            let setup   = conn.get_setup();
-            let screen  = setup.roots().nth(screen_num as usize).unwrap();
-            let root    = screen.root();
-            let width   = self.caps.width;
-            let height  = self.caps.height;
-
-            // Initialisation XShm si disponible
-            let xshm_seg = if self.use_xshm {
-                Self::init_xshm(&conn, width, height).ok()
-            } else {
-                None
-            };
-
-            // Initialisation XDamage si disponible
-            let damage = if self.use_xdamage {
-                Self::init_xdamage(&conn, root).ok()
-            } else {
-                None
-            };
-
-            let frame_duration = Duration::from_micros(1_000_000 / fps_limit.max(1) as u64);
-            let mut seq = 0u64;
-            let mut last_frame = Instant::now();
-            let mut pending_damage = false;
-            let mut damage_rects: Vec<DamageRect> = Vec::new();
-
-            info!(mode = if xshm_seg.is_some() { "XShm" } else { "basique" },
-                  damage = damage.is_some(),
-                  "boucle de capture démarrée");
-
-            loop {
-                // Vérification shutdown (non-bloquant)
-                if shutdown.is_cancelled() {
-                    info!("capture X11 arrêtée sur signal");
-                    break;
-                }
-
-                // Traitement des événements X (XDamage)
-                if let Some(_dmg) = &damage {
-                    while let Some(event) = conn.poll_for_event() {
-                        // Récupération des rectangles de dommage
-                        // (xdamage::NOTIFY_EVENT)
-                        damage_rects.push(DamageRect {
-                            x: 0, y: 0,
-                            width: width as u16,
-                            height: height as u16,
-                        });
-                        pending_damage = true;
-                    }
-                }
-
-                // Respect du fps_limit
-                let elapsed = last_frame.elapsed();
-                if elapsed < frame_duration {
-                    std::thread::sleep(frame_duration - elapsed);
-                    continue;
-                }
-
-                // Avec XDamage : ne capturer que si quelque chose a changé
-                // (sauf pour les keyframes périodiques)
-                let is_keyframe = seq == 0 || seq % (fps_limit as u64 * 2) == 0;
-                if damage.is_some() && !pending_damage && !is_keyframe {
-                    std::thread::sleep(Duration::from_millis(1));
-                    continue;
-                }
-
-                // Capture de la frame
-                let timestamp_us = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_micros() as u64;
-
-                let data = if let Some(ref _seg) = xshm_seg {
-                    // XShm : zéro copie — la mémoire est directement accessible
-                    Self::capture_xshm(&conn, root, width, height)?
-                } else {
-                    // Fallback : XGetImage
-                    Self::capture_basic(&conn, root, width, height)?
-                };
-
-                let frame = RawFrame {
-                    data,
-                    width,
-                    height,
-                    stride: width * 4,
-                    timestamp_us,
-                    seq,
-                    is_keyframe,
-                    damage_rects: std::mem::take(&mut damage_rects),
-                };
-
-                // Envoi bloquant avec backpressure
-                // Si le channel est plein, on drop la frame (plutôt que bloquer)
-                match tx.try_send(frame) {
-                    Ok(())  => {}
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        debug!("channel plein — frame {} droppée", seq);
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                        info!("channel fermé, arrêt capture");
-                        break;
-                    }
-                }
-
-                pending_damage = false;
-                last_frame = Instant::now();
-                seq += 1;
-            }
-
-            Ok(())
-        }
-
-        #[cfg(any(not(feature = "x11-capture"), feature = "stub"))]
-        {
-            // Mode stub : génère des frames synthétiques
-            let interval = std::time::Duration::from_millis(1000 / fps_limit.max(1) as u64);
-            let mut seq = 0u64;
-            let width = self.caps.width;
-            let height = self.caps.height;
-
-            loop {
-                if shutdown.is_cancelled() { break; }
-                std::thread::sleep(interval);
-
-                let data = vec![128u8; (width * height * 4) as usize];
-                let frame = RawFrame {
-                    data, width, height,
-                    stride: width * 4,
-                    timestamp_us: 0,
-                    seq,
-                    is_keyframe: seq % 60 == 0,
-                    damage_rects: vec![],
-                };
-                if tx.try_send(frame).is_err() { break; }
-                seq += 1;
-            }
-            Ok(())
-        }
+        #[cfg(not(feature = "x11-capture"))]
+        { self.capture_loop_stub(tx, fps_limit, shutdown) }
     }
 
-    /// Initialise un segment XShm
-    #[cfg(all(feature = "x11-capture", not(feature = "stub")))]
-    fn init_xshm(
-        conn: &xcb::Connection,
-        width: u32,
-        height: u32,
+    #[cfg(feature = "x11-capture")]
+    fn capture_loop_real(
+        &self,
+        tx: mpsc::Sender<RawFrame>,
+        fps_limit: u32,
+        shutdown: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
-        // En production : shmget + shmat + XShmAttach
-        // Implémentation complète nécessite unsafe pour shm syscalls
-        // Placeholder pour la Phase 1 — sera complété avec xcb::xshm
-        info!(width, height, "XShm init (placeholder Phase 1)");
+        use std::time::{Duration, Instant};
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
+
+        let display_str = format!(":{}", self.display_number);
+        let (conn, screen_num) = x11rb::connect(Some(&display_str))
+            .context("reconnexion X11 dans le thread de capture")?;
+
+        let screen = &conn.setup().roots[screen_num];
+        let root = screen.root;
+        let width = self.caps.width;
+        let height = self.caps.height;
+
+        let frame_duration = Duration::from_micros(1_000_000 / fps_limit.max(1) as u64);
+        let keyframe_period = (fps_limit as u64 * 2).max(1);
+        let mut seq = 0u64;
+        let mut last_frame = Instant::now();
+
+        info!(width, height, fps = fps_limit, "capture X11 réelle (XGetImage)");
+
+        loop {
+            if shutdown.is_cancelled() {
+                info!("capture X11 arrêtée");
+                break;
+            }
+
+            let elapsed = last_frame.elapsed();
+            if elapsed < frame_duration {
+                std::thread::sleep(frame_duration - elapsed);
+            }
+            last_frame = Instant::now();
+
+            let reply = match conn.get_image(
+                ImageFormat::Z_PIXMAP, root,
+                0, 0, width as u16, height as u16, u32::MAX,
+            ) {
+                Ok(cookie) => match cookie.reply() {
+                    Ok(r) => r,
+                    Err(e) => { warn!(error = ?e, "get_image reply"); continue; }
+                },
+                Err(e) => { warn!(error = ?e, "get_image"); continue; }
+            };
+
+            let bpp = 4usize;
+            let expected = (width * height) as usize * bpp;
+            let mut data = reply.data;
+            if data.len() < expected {
+                warn!(got = data.len(), expected, "taille image inattendue");
+                continue;
+            }
+            data.truncate(expected);
+            // Forcer alpha = 255
+            let mut i = 3;
+            while i < data.len() { data[i] = 0xFF; i += 4; }
+
+            let is_keyframe = seq == 0 || seq % keyframe_period == 0;
+            let timestamp_us = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_micros() as u64;
+
+            let frame = RawFrame {
+                data, width, height, stride: width * 4,
+                timestamp_us, seq, is_keyframe, damage_rects: vec![],
+            };
+
+            match tx.try_send(frame) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => debug!(seq, "frame droppée"),
+                Err(mpsc::error::TrySendError::Closed(_)) => { info!("channel fermé"); break; }
+            }
+            seq += 1;
+        }
         Ok(())
     }
 
-    /// Initialise XDamage sur la fenêtre root
-    #[cfg(all(feature = "x11-capture", not(feature = "stub")))]
-    fn init_xdamage(conn: &xcb::Connection, root: xcb::x::Window) -> Result<()> {
-        use xcb::xdamage;
-        let damage_id = conn.generate_id();
-        conn.send_request(&xdamage::Create {
-            damage: damage_id,
-            drawable: xcb::x::Drawable::Window(root),
-            level: xdamage::ReportLevel::NonEmpty,
-        });
-        conn.flush().context("flush XDamage create")?;
-        info!("XDamage initialisé");
+    #[cfg(not(feature = "x11-capture"))]
+    fn capture_loop_stub(
+        &self,
+        tx: mpsc::Sender<RawFrame>,
+        fps_limit: u32,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        use std::time::Duration;
+        let interval = Duration::from_millis(1000 / fps_limit.max(1) as u64);
+        let mut seq = 0u64;
+        let width = self.caps.width;
+        let height = self.caps.height;
+
+        info!(width, height, fps = fps_limit, "capture stub démarrée");
+
+        loop {
+            if shutdown.is_cancelled() { break; }
+            std::thread::sleep(interval);
+
+            let data: Vec<u8> = (0..width * height * 4)
+                .map(|i| {
+                    let pixel = i / 4; let channel = i % 4;
+                    let x = pixel % width; let y = pixel / width;
+                    match channel {
+                        0 => ((x + seq as u32) % 256) as u8,
+                        1 => ((y + seq as u32 / 2) % 256) as u8,
+                        2 => (seq as u32 % 256) as u8,
+                        _ => 255u8,
+                    }
+                }).collect();
+
+            let frame = RawFrame {
+                data, width, height, stride: width * 4,
+                timestamp_us: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default().as_micros() as u64,
+                seq, is_keyframe: seq % 60 == 0, damage_rects: vec![],
+            };
+            if tx.try_send(frame).is_err() { break; }
+            seq += 1;
+        }
         Ok(())
-    }
-
-    /// Capture via XGetImage (mode basique)
-    #[cfg(all(feature = "x11-capture", not(feature = "stub")))]
-    fn capture_basic(
-        conn: &xcb::Connection,
-        root: xcb::x::Window,
-        width: u32,
-        height: u32,
-    ) -> Result<Vec<u8>> {
-        use xcb::x;
-
-        let reply = conn.wait_for_reply(conn.send_request(&x::GetImage {
-            format:    x::ImageFormat::ZPixmap,
-            drawable:  x::Drawable::Window(root),
-            x: 0, y: 0,
-            width:     width as u16,
-            height:    height as u16,
-            plane_mask: u32::MAX,
-        })).context("XGetImage")?;
-
-        Ok(reply.data().to_vec())
-    }
-
-    /// Capture via XShm (zéro copie)
-    #[cfg(all(feature = "x11-capture", not(feature = "stub")))]
-    fn capture_xshm(
-        conn: &xcb::Connection,
-        root: xcb::x::Window,
-        width: u32,
-        height: u32,
-    ) -> Result<Vec<u8>> {
-        // En Phase 1 : fallback sur capture_basic jusqu'à implémentation XShm complète
-        // TODO Phase 1.1 : implémenter XShmGetImage avec segment partagé
-        Self::capture_basic(conn, root, width, height)
     }
 }
