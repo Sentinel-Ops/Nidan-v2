@@ -9,6 +9,7 @@ use anyhow::Context;
 use tracing::{error, info};
 
 mod capture;
+mod input;
 mod config;
 mod encoder;
 mod session;

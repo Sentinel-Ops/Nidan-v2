@@ -33,7 +33,7 @@ toml         = { workspace = true }
 clap         = { workspace = true }
 
 # Capture X11 (pur Rust, derrière la feature x11-capture)
-x11rb = { version = "0.13", optional = true, features = ["shm", "randr", "damage"] }
+x11rb = { version = "0.13", optional = true, features = ["shm", "randr", "damage", "xtest"] }
 openh264 = { version = "0.6", optional = true }
 
 [features]

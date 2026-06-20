@@ -271,6 +271,40 @@ impl QuicServer {
         let mut video_tx = conn.open_uni().await
             .context("ouverture stream vidéo QUIC")?;
 
+        // Tâche de réception des inputs client → injection XTEST
+        let input_conn = conn.clone();
+        let input_shutdown = session_shutdown.clone();
+        let inj_display = display;
+        let inj_w = caps.width;
+        let inj_h = caps.height;
+        tokio::spawn(async move {
+            // Accepter le stream de contrôle bi-directionnel ouvert par le client
+            let mut ctrl_rx = match input_conn.accept_bi().await {
+                Ok((_tx, rx)) => rx,
+                Err(e) => { tracing::warn!(error = %e, "pas de stream de contrôle inputs"); return; }
+            };
+            let mut injector = match crate::input::InputInjector::new(inj_display, inj_w, inj_h) {
+                Ok(i) => i,
+                Err(e) => { tracing::warn!(error = %e, "injecteur indisponible"); return; }
+            };
+            tracing::info!("réception d'inputs démarrée");
+            loop {
+                if input_shutdown.is_cancelled() { break; }
+                // Lire un InputBatch length-prefixed
+                let mut len_buf = [0u8; 4];
+                if ctrl_rx.read_exact(&mut len_buf).await.is_err() { break; }
+                let len = u32::from_be_bytes(len_buf) as usize;
+                if len == 0 || len > 65536 { continue; }
+                let mut buf = vec![0u8; len];
+                if ctrl_rx.read_exact(&mut buf).await.is_err() { break; }
+                match serde_json::from_slice::<nidan_proto::InputBatch>(&buf) {
+                    Ok(batch) => { let _ = injector.inject_batch(&batch); }
+                    Err(e) => tracing::debug!(error = %e, "décodage InputBatch"),
+                }
+            }
+            tracing::info!(injected = injector.injected_count(), "réception d'inputs terminée");
+        });
+
         info!(session_id = %session_id, "pipeline démarré — streaming vidéo");
 
         // Boucle de streaming : enc → proto → QUIC
