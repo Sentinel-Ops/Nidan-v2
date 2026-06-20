@@ -108,6 +108,12 @@ impl EncodedFrame {
 }
 
 /// Pilote le pipeline d'encodage dans une tâche tokio
+/// Encodeur actif selon la feature de compilation
+#[cfg(feature = "openh264")]
+pub use openh264_enc::Openh264Encoder as ActiveEncoder;
+#[cfg(not(feature = "openh264"))]
+pub use ffmpeg::FfmpegEncoder as ActiveEncoder;
+
 pub struct EncoderPipeline {
     params: EncoderParams,
     session_key: Option<SessionKey>,
@@ -130,8 +136,8 @@ impl EncoderPipeline {
     ) -> tokio::task::JoinHandle<Result<()>> {
         // L'encodage FFmpeg est bloquant → thread dédié
         tokio::task::spawn_blocking(move || {
-            let mut encoder = ffmpeg::FfmpegEncoder::new(&self.params)
-                .context("initialisation encodeur FFmpeg")?;
+            let mut encoder = ActiveEncoder::new(&self.params)
+                .context("initialisation encodeur")?;
 
             let mut cipher = self.session_key.as_ref().map(StreamCipher::new);
             let session_start_us = std::time::SystemTime::now()

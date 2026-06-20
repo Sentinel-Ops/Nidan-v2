@@ -166,8 +166,8 @@ impl QuicServer {
         let remote = conn.remote_address();
         info!(remote = %remote, "nouvelle connexion QUIC");
 
-        // 1. Handshake : réception du ClientServerHandshake
-        let handshake = Self::receive_handshake(&conn).await
+        // 1. Handshake : réception du ClientServerHandshake (garde le stream pour l'ACK)
+        let (handshake, mut hs_tx) = Self::receive_handshake(&conn).await
             .context("réception handshake")?;
 
         let session_id = SessionId::new();
@@ -187,7 +187,7 @@ impl QuicServer {
             ..Default::default()
         };
 
-        Self::send_ack(&conn, &ack).await
+        Self::send_ack(&mut hs_tx, &ack).await
             .context("envoi handshake ACK")?;
 
         // 3. Démarrage du pipeline capture → encodage → stream
@@ -195,35 +195,34 @@ impl QuicServer {
     }
 
     /// Réceptionne le handshake initial du client
-    async fn receive_handshake(conn: &quinn::Connection) -> Result<ClientServerHandshake> {
-        let mut stream = conn.accept_bi().await
+    async fn receive_handshake(
+        conn: &quinn::Connection,
+    ) -> Result<(ClientServerHandshake, quinn::SendStream)> {
+        // Le client ouvre UN stream bi : il envoie le handshake puis attend l'ACK
+        // sur le même stream. On garde donc la moitié SEND pour répondre.
+        let (tx, mut rx) = conn.accept_bi().await
             .context("ouverture stream bi pour handshake")?;
-        let rx = &mut stream.1;
 
-        // Lecture du message length-prefixed
         let mut len_buf = [0u8; 4];
         rx.read_exact(&mut len_buf).await.context("lecture longueur handshake")?;
         let len = u32::from_be_bytes(len_buf) as usize;
-
         if len > 4096 {
             anyhow::bail!("handshake trop grand: {} bytes", len);
         }
-
         let mut buf = vec![0u8; len];
         rx.read_exact(&mut buf).await.context("lecture payload handshake")?;
 
-        nidan_proto::decode_message::<ClientServerHandshake>(&buf)
-            .context("décodage proto ClientServerHandshake")
+        let hs = nidan_proto::decode_message::<ClientServerHandshake>(&buf)
+            .context("décodage proto ClientServerHandshake")?;
+        Ok((hs, tx))
     }
 
-    /// Envoie l'ACK de handshake
-    async fn send_ack(conn: &quinn::Connection, ack: &ServerHandshakeAck) -> Result<()> {
-        let (mut tx, _rx) = conn.open_bi().await.context("ouverture stream bi pour ACK")?;
-        let data = nidan_proto::encode_message(&ack)?;
+    /// Envoie l'ACK sur le MÊME stream que le handshake
+    async fn send_ack(tx: &mut quinn::SendStream, ack: &ServerHandshakeAck) -> Result<()> {
+        let data = serde_json::to_vec(ack).context("sérialisation ACK")?;
         let len = (data.len() as u32).to_be_bytes();
         tx.write_all(&len).await.context("écriture longueur ACK")?;
         tx.write_all(&data).await.context("écriture payload ACK")?;
-        tx.finish().context("fermeture stream ACK")?;
         Ok(())
     }
 
@@ -295,7 +294,7 @@ impl QuicServer {
                         }
                         Some(f) => {
                             let proto_frame = f.into_proto(0);
-                            let data = nidan_proto::encode_message(&proto_frame)?;
+                            let data = serde_json::to_vec(&proto_frame)?;
                             let len = (data.len() as u32).to_be_bytes();
 
                             // Length-prefixed protobuf sur stream QUIC

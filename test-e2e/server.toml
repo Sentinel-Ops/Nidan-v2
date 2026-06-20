@@ -1,0 +1,26 @@
+[network]
+bind_addr = "127.0.0.1:7444"
+session_timeout_secs = 3600
+max_connections = 1
+
+[tls]
+ca_cert = "/tmp/nidan-e2e/certs/ca.crt"
+cert    = "/tmp/nidan-e2e/certs/server.crt"
+key     = "/tmp/nidan-e2e/certs/server.key"
+
+[capture]
+display_number = 100
+use_xshm = false
+use_xdamage = false
+capture_queue_depth = 4
+
+[video]
+codec = "h264"
+max_fps = 10
+target_bitrate_kbps = 0
+pixel_format = "yuv420p"
+hardware_accel = false
+
+[security]
+seccomp_enabled = false
+e2e_encryption = false

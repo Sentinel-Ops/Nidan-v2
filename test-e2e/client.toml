@@ -1,0 +1,40 @@
+[network]
+broker_addr = "127.0.0.1:7443"
+connect_timeout_secs = 10
+auto_reconnect = false
+reconnect_delay_secs = 3
+
+[tls]
+ca_cert = "/tmp/nidan-e2e/certs/ca.crt"
+cert    = "/tmp/nidan-e2e/certs/client.crt"
+key     = "/tmp/nidan-e2e/certs/client.key"
+
+[video]
+preferred_codec = "h264"
+max_fps = 10
+target_bitrate_kbps = 0
+hardware_decode = false
+decode_buffer_size = 4
+
+[display]
+fullscreen = false
+seamless = false
+scaling = "fit"
+window_title = "NIDAN test"
+
+[input]
+capture_system_shortcuts = false
+mouse_sensitivity = 1.0
+touch_enabled = false
+escape_combo = "Ctrl+Alt+F"
+
+[clipboard]
+allow_client_to_server = true
+allow_server_to_client = true
+max_size_bytes = 1048576
+audit_transfers = true
+
+[security]
+verify_server_cert = true
+e2e_encryption = false
+auth_method = "mtls"

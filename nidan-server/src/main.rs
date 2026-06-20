@@ -20,6 +20,11 @@ use config::ServerConfig;
 async fn main() -> anyhow::Result<()> {
     nidan_common::logging::init("nidan-server");
 
+    // Provider crypto rustls (requis avant tout usage TLS)
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
     // Config depuis variable d'env ou chemin par défaut
     let config_path = std::env::var("NIDAN_SERVER_CONFIG")
         .unwrap_or_else(|_| "/etc/nidan-server.toml".to_string());

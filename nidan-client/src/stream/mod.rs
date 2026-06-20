@@ -304,8 +304,8 @@ impl NidanClient {
             ..Default::default()
         };
 
-        // Envoi length-prefixed
-        let data = nidan_proto::encode_message(&hs)?;
+        // Envoi length-prefixed : [len4][json] (pas de double préfixe)
+        let data = serde_json::to_vec(&hs).context("sérialisation handshake")?;
         tx.write_all(&(data.len() as u32).to_be_bytes()).await
             .context("écriture len handshake")?;
         tx.write_all(&data).await.context("écriture handshake")?;
@@ -346,7 +346,7 @@ impl NidanClient {
         tx: &mut quinn::SendStream,
         batch: &InputBatch,
     ) -> Result<()> {
-        let data = nidan_proto::encode_message(&batch)?;
+        let data = serde_json::to_vec(batch)?;
         tx.write_all(&(data.len() as u32).to_be_bytes()).await?;
         tx.write_all(&data).await?;
         Ok(())

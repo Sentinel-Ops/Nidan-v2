@@ -67,6 +67,10 @@ async fn main() -> anyhow::Result<()> {
 
     nidan_common::logging::init("nidan-client");
 
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
     info!(version = env!("CARGO_PKG_VERSION"), "nidan-client démarrage");
 
     let mut cfg = ClientConfig::load(&args.config)
