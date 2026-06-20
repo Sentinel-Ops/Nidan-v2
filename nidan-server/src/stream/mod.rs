@@ -341,6 +341,8 @@ impl QuicServer {
         });
 
         info!(session_id = %session_id, "pipeline démarré — streaming vidéo");
+        let mut frames_encrypted: u64 = 0;
+        let mut frames_total: u64 = 0;
 
         // Boucle de streaming : enc → proto → QUIC
         loop {
@@ -385,6 +387,13 @@ impl QuicServer {
                             if let Err(e) = video_tx.write_all(&data).await {
                                 warn!(error = %e, "erreur écriture payload vidéo");
                                 break;
+                            }
+                            frames_total += 1;
+                            if proto_frame.encrypted { frames_encrypted += 1; }
+                            if frames_total % 60 == 0 {
+                                info!(session_id = %session_id, total = frames_total,
+                                      chiffrees = frames_encrypted,
+                                      "frames envoyées");
                             }
                         }
                     }
