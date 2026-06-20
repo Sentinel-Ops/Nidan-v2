@@ -32,9 +32,12 @@ config       = { workspace = true }
 toml         = { workspace = true }
 clap         = { workspace = true }
 
+openh264 = { version = "0.6", optional = true }
+
 [features]
 default        = ["stub"]
 stub           = []
-full           = ["sdl2-renderer", "ffmpeg"]
+full           = ["sdl2-renderer", "openh264"]
 sdl2-renderer  = []
 ffmpeg         = []
+openh264       = ["dep:openh264"]

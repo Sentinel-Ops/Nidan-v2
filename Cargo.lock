@@ -1286,6 +1286,7 @@ dependencies = [
  "config",
  "nidan-common",
  "nidan-proto",
+ "openh264",
  "quinn",
  "rand 0.8.6",
  "rustls",

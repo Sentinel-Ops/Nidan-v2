@@ -27,6 +27,7 @@ use nidan_common::crypto::StreamCipher;
 use nidan_proto::{VideoCodec, VideoFrame};
 
 pub mod ffmpeg;
+pub mod openh264_dec;
 
 /// Une frame décodée prête pour l'affichage
 #[derive(Debug)]
@@ -82,6 +83,12 @@ impl DecoderCodec {
 }
 
 /// Pipeline de décodage complet
+/// Implémentation de décodeur active selon la feature
+#[cfg(feature = "openh264")]
+pub use openh264_dec::Openh264Decoder as ActiveDecoder;
+#[cfg(not(feature = "openh264"))]
+pub use ffmpeg::FfmpegDecoder as ActiveDecoder;
+
 pub struct DecoderPipeline {
     hardware_decode: bool,
     cipher: Option<StreamCipher>,
@@ -102,7 +109,7 @@ impl DecoderPipeline {
     ) -> tokio::task::JoinHandle<Result<()>> {
         // Le décodage FFmpeg est bloquant → spawn_blocking
         tokio::task::spawn_blocking(move || {
-            let mut decoder: Option<ffmpeg::FfmpegDecoder> = None;
+            let mut decoder: Option<ActiveDecoder> = None;
             let mut cipher = self.cipher;
             let mut frames_decoded = 0u64;
             let mut frames_dropped = 0u64;
@@ -144,11 +151,11 @@ impl DecoderPipeline {
                 if decoder.is_none() {
                     let codec = DecoderCodec::from_proto(frame.codec);
                     info!(codec = codec.ffmpeg_name(), "initialisation décodeur FFmpeg");
-                    match ffmpeg::FfmpegDecoder::new(codec, self.hardware_decode) {
+                    match ActiveDecoder::new(codec, self.hardware_decode) {
                         Ok(d) => decoder = Some(d),
                         Err(e) => {
                             warn!(error = %e, "décodeur FFmpeg indispo — fallback stub");
-                            decoder = Some(ffmpeg::FfmpegDecoder::stub(
+                            decoder = Some(ActiveDecoder::stub(
                                 frame.width, frame.height
                             ));
                         }
