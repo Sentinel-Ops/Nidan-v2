@@ -205,6 +205,8 @@ pub struct ServerHandshakeAck {
     pub selected_format: i32,
     pub state:          i32,
     pub stream_id:      u32,
+    pub width:          u32,
+    pub height:         u32,
     pub error_message:  String,
 }
 

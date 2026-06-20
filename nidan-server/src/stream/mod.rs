@@ -178,12 +178,19 @@ impl QuicServer {
             .map(|c| c.capabilities().clone())
             .ok();
 
+        // Résolution réelle capturée (défaut 1280x720 si caps indisponibles)
+        let (cap_w, cap_h) = caps.as_ref()
+            .map(|c| (c.width, c.height))
+            .unwrap_or((1280, 720));
+
         let ack = ServerHandshakeAck {
             accepted: true,
             selected_codec: handshake.preferred_codec,
             selected_format: 1, // YUV420P
             state: SessionState::Active as i32,
             stream_id: 1,
+            width: cap_w,
+            height: cap_h,
             ..Default::default()
         };
 

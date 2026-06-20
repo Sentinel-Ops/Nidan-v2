@@ -97,7 +97,7 @@ fn run_sdl2_real(
         // ── Événements SDL2 ──────────────────────────────────────────────
         for event in event_pump.poll_iter() {
             match event {
-                Event::Quit { .. } => break 'main,
+                Event::Quit { .. } => { info!("SDL2: Event::Quit reçu → sortie"); break 'main; }
 
                 Event::KeyDown { keycode: Some(Keycode::F), keymod, .. }
                     if keymod.contains(sdl2::keyboard::Mod::LCTRLMOD)
@@ -180,7 +180,7 @@ fn run_sdl2_real(
             match frame_rx.try_recv() {
                 Ok(f) => { latest_frame = Some(f); }
                 Err(mpsc::TryRecvError::Empty)        => break,
-                Err(mpsc::TryRecvError::Disconnected) => break 'main,
+                Err(mpsc::TryRecvError::Disconnected) => { info!("SDL2: canal de frames déconnecté → sortie"); break 'main; }
             }
         }
 

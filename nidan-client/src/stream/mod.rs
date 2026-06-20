@@ -175,12 +175,11 @@ impl NidanClient {
         let ack = Self::do_handshake(&conn, &self.config).await
             .context("handshake serveur")?;
 
-        let width  = if self.config.display.force_width.is_some() {
-            self.config.display.force_width.unwrap()
-        } else { 1920 };
-        let height = if self.config.display.force_height.is_some() {
-            self.config.display.force_height.unwrap()
-        } else { 1080 };
+        // Priorité : config forcée > résolution annoncée par le serveur > défaut
+        let width = self.config.display.force_width
+            .unwrap_or(if ack.width > 0 { ack.width } else { 1280 });
+        let height = self.config.display.force_height
+            .unwrap_or(if ack.height > 0 { ack.height } else { 720 });
 
         info!(width, height, codec = ack.selected_codec, "handshake OK — démarrage session");
 
