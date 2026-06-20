@@ -172,7 +172,7 @@ impl NidanClient {
         info!(remote = %conn.remote_address(), "connexion QUIC serveur établie");
 
         // ── Handshake ──────────────────────────────────────────────────────
-        let (ack, mut video_cipher) = Self::do_handshake(&conn, &self.config).await
+        let (ack, mut video_cipher, mut control_cipher) = Self::do_handshake(&conn, &self.config).await
             .context("handshake serveur")?;
 
         // Priorité : config forcée > résolution annoncée par le serveur > défaut
@@ -276,7 +276,7 @@ impl NidanClient {
 
                 // InputBatch → envoi au serveur sur le stream de contrôle
                 Some(batch) = rx_batch.recv() => {
-                    if let Err(e) = Self::send_input_batch(&mut ctrl_tx, &batch).await {
+                    if let Err(e) = Self::send_input_batch(&mut ctrl_tx, &batch, control_cipher.as_mut()).await {
                         warn!(error = %e, "erreur envoi inputs");
                     }
                 }
@@ -300,7 +300,7 @@ impl NidanClient {
     async fn do_handshake(
         conn: &quinn::Connection,
         config: &ClientConfig,
-    ) -> Result<(ServerHandshakeAck, Option<nidan_common::crypto::StreamCipher>)> {
+    ) -> Result<(ServerHandshakeAck, Option<nidan_common::crypto::StreamCipher>, Option<nidan_common::crypto::StreamCipher>)> {
         let (mut tx, mut rx) = conn.open_bi().await
             .context("ouverture stream handshake")?;
 
@@ -342,18 +342,18 @@ impl NidanClient {
         let ack = nidan_proto::decode_message::<ServerHandshakeAck>(&buf).context("décodage ACK")?;
 
         // Si le serveur a activé le E2E, dériver le cipher vidéo
-        let video_cipher = if ack.e2e_enabled && !ack.server_public_key.is_empty() {
+        let (video_cipher, control_cipher) = if ack.e2e_enabled && !ack.server_public_key.is_empty() {
             let secret = client_kx.shared_secret(&ack.server_public_key)
                 .context("ECDH côté client")?;
             let keys = derive_session_keys(&secret, &client_nonce, &ack.server_nonce)
                 .context("dérivation clés client")?;
-            info!("chiffrement E2E actif (X25519 + ChaCha20-Poly1305)");
-            Some(StreamCipher::new(&keys.video))
+            info!("chiffrement E2E actif (X25519 + ChaCha20-Poly1305) — vidéo + inputs");
+            (Some(StreamCipher::new(&keys.video)), Some(StreamCipher::new(&keys.control)))
         } else {
-            None
+            (None, None)
         };
 
-        Ok((ack, video_cipher))
+        Ok((ack, video_cipher, control_cipher))
     }
 
     /// Lit une VideoFrame length-prefixed depuis un stream QUIC
@@ -377,10 +377,30 @@ impl NidanClient {
     async fn send_input_batch(
         tx: &mut quinn::SendStream,
         batch: &InputBatch,
+        cipher: Option<&mut nidan_common::crypto::StreamCipher>,
     ) -> Result<()> {
-        let data = serde_json::to_vec(batch)?;
-        tx.write_all(&(data.len() as u32).to_be_bytes()).await?;
-        tx.write_all(&data).await?;
+        let json = serde_json::to_vec(batch)?;
+        // Format fil : [flag 1o][si chiffré: nonce 12o][payload]
+        // flag = 0 → JSON en clair, flag = 1 → ChaCha20-Poly1305
+        let framed = match cipher {
+            Some(c) => {
+                let (ct, nonce) = c.encrypt(&json)
+                    .map_err(|e| anyhow::anyhow!("chiffrement inputs: {e}"))?;
+                let mut out = Vec::with_capacity(1 + nonce.len() + ct.len());
+                out.push(1u8);
+                out.extend_from_slice(&nonce);
+                out.extend_from_slice(&ct);
+                out
+            }
+            None => {
+                let mut out = Vec::with_capacity(1 + json.len());
+                out.push(0u8);
+                out.extend_from_slice(&json);
+                out
+            }
+        };
+        tx.write_all(&(framed.len() as u32).to_be_bytes()).await?;
+        tx.write_all(&framed).await?;
         Ok(())
     }
 }

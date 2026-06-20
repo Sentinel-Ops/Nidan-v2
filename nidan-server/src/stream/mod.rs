@@ -187,7 +187,7 @@ impl QuicServer {
         let e2e_enabled = config.security.e2e_encryption
             && !handshake.client_public_key.is_empty();
 
-        let (server_kx, server_nonce, video_cipher) = if e2e_enabled {
+        let (server_kx, server_nonce, video_cipher, control_cipher) = if e2e_enabled {
             use nidan_common::crypto::{KeyExchange, derive_session_keys, StreamCipher};
             let kx = KeyExchange::new();
             let server_nonce = nidan_common::crypto::random_bytes(32);
@@ -195,16 +195,18 @@ impl QuicServer {
                 Ok(secret) => {
                     let keys = derive_session_keys(&secret, &handshake.client_nonce, &server_nonce)
                         .context("dérivation clés de session")?;
-                    info!(session_id = %session_id, "chiffrement E2E activé (X25519 + ChaCha20-Poly1305)");
-                    (Some(kx), server_nonce, Some(StreamCipher::new(&keys.video)))
+                    info!(session_id = %session_id, "chiffrement E2E activé (X25519 + ChaCha20-Poly1305) — vidéo + inputs");
+                    (Some(kx), server_nonce,
+                     Some(StreamCipher::new(&keys.video)),
+                     Some(StreamCipher::new(&keys.control)))
                 }
                 Err(e) => {
                     warn!(error = %e, "échec ECDH — session en clair");
-                    (None, vec![], None)
+                    (None, vec![], None, None)
                 }
             }
         } else {
-            (None, vec![], None)
+            (None, vec![], None, None)
         };
 
         let ack = ServerHandshakeAck {
@@ -225,7 +227,7 @@ impl QuicServer {
             .context("envoi handshake ACK")?;
 
         // 3. Démarrage du pipeline capture → encodage → stream
-        Self::run_session(conn, config, display, session_id, handshake, video_cipher, shutdown).await
+        Self::run_session(conn, config, display, session_id, handshake, video_cipher, control_cipher, shutdown).await
     }
 
     /// Réceptionne le handshake initial du client
@@ -268,6 +270,7 @@ impl QuicServer {
         session_id: SessionId,
         handshake: ClientServerHandshake,
         mut video_cipher: Option<nidan_common::crypto::StreamCipher>,
+        control_cipher: Option<nidan_common::crypto::StreamCipher>,
         shutdown: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
         let session_shutdown = tokio_util::sync::CancellationToken::new();
@@ -312,6 +315,7 @@ impl QuicServer {
         let inj_display = display;
         let inj_w = caps.width;
         let inj_h = caps.height;
+        let input_cipher = control_cipher;
         tokio::spawn(async move {
             // Accepter le stream de contrôle bi-directionnel ouvert par le client
             let mut ctrl_rx = match input_conn.accept_bi().await {
@@ -332,7 +336,28 @@ impl QuicServer {
                 if len == 0 || len > 65536 { continue; }
                 let mut buf = vec![0u8; len];
                 if ctrl_rx.read_exact(&mut buf).await.is_err() { break; }
-                match serde_json::from_slice::<nidan_proto::InputBatch>(&buf) {
+                if buf.is_empty() { continue; }
+
+                // Format : [flag 1o][si chiffré: nonce 12o][payload]
+                let flag = buf[0];
+                let json: Vec<u8> = if flag == 1 {
+                    // Chiffré : extraire nonce (12o) + ciphertext
+                    if buf.len() < 1 + 12 { tracing::debug!("trame inputs chiffrée trop courte"); continue; }
+                    let nonce = &buf[1..13];
+                    let ct = &buf[13..];
+                    match input_cipher.as_ref() {
+                        Some(cipher) => match cipher.decrypt(ct, nonce) {
+                            Ok(pt) => pt,
+                            Err(e) => { tracing::warn!(error = %e, "déchiffrement inputs échoué"); continue; }
+                        },
+                        None => { tracing::warn!("inputs chiffrés mais pas de clé contrôle"); continue; }
+                    }
+                } else {
+                    // En clair : payload = tout après le flag
+                    buf[1..].to_vec()
+                };
+
+                match serde_json::from_slice::<nidan_proto::InputBatch>(&json) {
                     Ok(batch) => { let _ = injector.inject_batch(&batch); }
                     Err(e) => tracing::debug!(error = %e, "décodage InputBatch"),
                 }
