@@ -33,6 +33,7 @@ use nidan_proto::{VideoCodec, VideoFrame};
 use crate::capture::RawFrame;
 
 pub mod ffmpeg;
+pub mod openh264_enc;
 pub mod params;
 
 pub use params::EncoderParams;

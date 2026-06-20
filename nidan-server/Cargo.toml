@@ -34,10 +34,12 @@ clap         = { workspace = true }
 
 # Capture X11 (pur Rust, derrière la feature x11-capture)
 x11rb = { version = "0.13", optional = true, features = ["shm", "randr", "damage"] }
+openh264 = { version = "0.6", optional = true }
 
 [features]
 default     = ["stub"]
 stub        = []
-full        = ["x11-capture"]
+full        = ["x11-capture", "openh264"]
 x11-capture = ["dep:x11rb"]
 ffmpeg      = []
+openh264    = ["dep:openh264"]

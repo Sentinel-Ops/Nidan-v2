@@ -1,0 +1,17 @@
+[package]
+name        = "capture-test"
+description = "Outil de test isolé pour la capture X11 NIDAN"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+
+[[bin]]
+name = "capture-test"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+x11rb  = { version = "0.13", features = ["shm", "randr", "damage"] }
+png    = "0.17"

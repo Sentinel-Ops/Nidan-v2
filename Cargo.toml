@@ -6,6 +6,8 @@ members = [
     "nidan-client",
     "nidan-broker",
     "nidan-audit",
+    "capture-test",
+    "encode-test",
 ]
 resolver = "2"
 
