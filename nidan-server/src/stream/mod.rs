@@ -183,6 +183,30 @@ impl QuicServer {
             .map(|c| (c.width, c.height))
             .unwrap_or((1280, 720));
 
+        // Échange de clés E2E (X25519) si le client a fourni sa clé publique
+        let e2e_enabled = config.security.e2e_encryption
+            && !handshake.client_public_key.is_empty();
+
+        let (server_kx, server_nonce, video_cipher) = if e2e_enabled {
+            use nidan_common::crypto::{KeyExchange, derive_session_keys, StreamCipher};
+            let kx = KeyExchange::new();
+            let server_nonce = nidan_common::crypto::random_bytes(32);
+            match kx.shared_secret(&handshake.client_public_key) {
+                Ok(secret) => {
+                    let keys = derive_session_keys(&secret, &handshake.client_nonce, &server_nonce)
+                        .context("dérivation clés de session")?;
+                    info!(session_id = %session_id, "chiffrement E2E activé (X25519 + ChaCha20-Poly1305)");
+                    (Some(kx), server_nonce, Some(StreamCipher::new(&keys.video)))
+                }
+                Err(e) => {
+                    warn!(error = %e, "échec ECDH — session en clair");
+                    (None, vec![], None)
+                }
+            }
+        } else {
+            (None, vec![], None)
+        };
+
         let ack = ServerHandshakeAck {
             accepted: true,
             selected_codec: handshake.preferred_codec,
@@ -191,6 +215,9 @@ impl QuicServer {
             stream_id: 1,
             width: cap_w,
             height: cap_h,
+            server_public_key: server_kx.as_ref().map(|k| k.public.to_vec()).unwrap_or_default(),
+            server_nonce,
+            e2e_enabled: video_cipher.is_some(),
             ..Default::default()
         };
 
@@ -198,7 +225,7 @@ impl QuicServer {
             .context("envoi handshake ACK")?;
 
         // 3. Démarrage du pipeline capture → encodage → stream
-        Self::run_session(conn, config, display, session_id, handshake, shutdown).await
+        Self::run_session(conn, config, display, session_id, handshake, video_cipher, shutdown).await
     }
 
     /// Réceptionne le handshake initial du client
@@ -240,6 +267,7 @@ impl QuicServer {
         display: u32,
         session_id: SessionId,
         handshake: ClientServerHandshake,
+        mut video_cipher: Option<nidan_common::crypto::StreamCipher>,
         shutdown: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
         let session_shutdown = tokio_util::sync::CancellationToken::new();
@@ -334,7 +362,18 @@ impl QuicServer {
                             break;
                         }
                         Some(f) => {
-                            let proto_frame = f.into_proto(0);
+                            let mut proto_frame = f.into_proto(0);
+                            // Chiffrement E2E de la charge vidéo si activé
+                            if let Some(ref mut cipher) = video_cipher {
+                                match cipher.encrypt(&proto_frame.encoded_data) {
+                                    Ok((ct, nonce)) => {
+                                        proto_frame.encoded_data = ct;
+                                        proto_frame.nonce = nonce.to_vec();
+                                        proto_frame.encrypted = true;
+                                    }
+                                    Err(e) => { tracing::error!(error = %e, "chiffrement frame"); continue; }
+                                }
+                            }
                             let data = serde_json::to_vec(&proto_frame)?;
                             let len = (data.len() as u32).to_be_bytes();
 

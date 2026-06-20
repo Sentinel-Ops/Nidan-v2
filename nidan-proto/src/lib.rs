@@ -158,6 +158,7 @@ pub struct VideoFrame {
     pub pts_ms:             u32,
     pub encode_duration_us: u32,
     pub damage_hint:        Vec<u8>,
+    pub encrypted:          bool,
 }
 
 /// Demande de session client → broker
@@ -195,6 +196,8 @@ pub struct ClientServerHandshake {
     pub target_bitrate_kbps: u32,
     pub audio_enabled:       bool,
     pub seamless_mode:       bool,
+    pub client_public_key:   Vec<u8>,
+    pub client_nonce:        Vec<u8>,
 }
 
 /// ACK du serveur au handshake
@@ -207,6 +210,9 @@ pub struct ServerHandshakeAck {
     pub stream_id:      u32,
     pub width:          u32,
     pub height:         u32,
+    pub server_public_key: Vec<u8>,
+    pub server_nonce:      Vec<u8>,
+    pub e2e_enabled:       bool,
     pub error_message:  String,
 }
 

@@ -103,6 +103,7 @@ impl EncodedFrame {
             pts_ms: self.pts_ms,
             encode_duration_us: self.encode_duration_us,
             damage_hint: vec![],
+            encrypted: false,
         }
     }
 }

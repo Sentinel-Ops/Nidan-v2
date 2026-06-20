@@ -172,7 +172,7 @@ impl NidanClient {
         info!(remote = %conn.remote_address(), "connexion QUIC serveur établie");
 
         // ── Handshake ──────────────────────────────────────────────────────
-        let ack = Self::do_handshake(&conn, &self.config).await
+        let (ack, mut video_cipher) = Self::do_handshake(&conn, &self.config).await
             .context("handshake serveur")?;
 
         // Priorité : config forcée > résolution annoncée par le serveur > défaut
@@ -247,7 +247,19 @@ impl NidanClient {
                 // Réception d'une VideoFrame depuis le serveur
                 result = Self::read_video_frame(&mut video_rx) => {
                     match result {
-                        Ok(frame) => {
+                        Ok(mut frame) => {
+                            // Déchiffrement E2E si la frame est chiffrée
+                            if frame.encrypted {
+                                if let Some(ref cipher) = video_cipher {
+                                    match cipher.decrypt(&frame.encoded_data, &frame.nonce) {
+                                        Ok(pt) => { frame.encoded_data = pt; frame.encrypted = false; }
+                                        Err(e) => { warn!(error = %e, "déchiffrement frame échoué"); continue; }
+                                    }
+                                } else {
+                                    warn!("frame chiffrée mais pas de clé E2E — ignorée");
+                                    continue;
+                                }
+                            }
                             if tx_dec_in.send(frame).await.is_err() { break; }
                         }
                         Err(e) => {
@@ -288,9 +300,14 @@ impl NidanClient {
     async fn do_handshake(
         conn: &quinn::Connection,
         config: &ClientConfig,
-    ) -> Result<ServerHandshakeAck> {
+    ) -> Result<(ServerHandshakeAck, Option<nidan_common::crypto::StreamCipher>)> {
         let (mut tx, mut rx) = conn.open_bi().await
             .context("ouverture stream handshake")?;
+
+        // Génère la paire X25519 + nonce pour le chiffrement E2E
+        use nidan_common::crypto::{KeyExchange, derive_session_keys, StreamCipher};
+        let client_kx = KeyExchange::new();
+        let client_nonce = nidan_common::crypto::random_bytes(32);
 
         let hs = ClientServerHandshake {
             session_id:          SessionId::new().0,
@@ -300,6 +317,8 @@ impl NidanClient {
             target_bitrate_kbps: config.video.target_bitrate_kbps,
             audio_enabled:       false,
             seamless_mode:       config.display.seamless,
+            client_public_key:   if config.security.e2e_encryption { client_kx.public.to_vec() } else { vec![] },
+            client_nonce:        if config.security.e2e_encryption { client_nonce.clone() } else { vec![] },
             ..Default::default()
         };
 
@@ -320,7 +339,21 @@ impl NidanClient {
         let mut buf = vec![0u8; len];
         rx.read_exact(&mut buf).await.context("lecture payload ACK")?;
 
-        nidan_proto::decode_message::<ServerHandshakeAck>(&buf).context("décodage ACK")
+        let ack = nidan_proto::decode_message::<ServerHandshakeAck>(&buf).context("décodage ACK")?;
+
+        // Si le serveur a activé le E2E, dériver le cipher vidéo
+        let video_cipher = if ack.e2e_enabled && !ack.server_public_key.is_empty() {
+            let secret = client_kx.shared_secret(&ack.server_public_key)
+                .context("ECDH côté client")?;
+            let keys = derive_session_keys(&secret, &client_nonce, &ack.server_nonce)
+                .context("dérivation clés client")?;
+            info!("chiffrement E2E actif (X25519 + ChaCha20-Poly1305)");
+            Some(StreamCipher::new(&keys.video))
+        } else {
+            None
+        };
+
+        Ok((ack, video_cipher))
     }
 
     /// Lit une VideoFrame length-prefixed depuis un stream QUIC

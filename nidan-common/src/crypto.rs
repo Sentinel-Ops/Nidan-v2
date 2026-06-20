@@ -15,6 +15,54 @@ use sha2::Sha256;
 use crate::error::{NidanError, NidanResult};
 use nidan_proto::{CHACHA20_NONCE_SIZE, SESSION_KEY_SIZE};
 
+use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
+
+/// Paire de clés éphémère X25519 pour l'échange ECDH d'une session.
+///
+/// Chaque pair (client et serveur) génère sa propre paire, échange la clé
+/// publique dans le handshake, puis calcule le même secret partagé.
+pub struct KeyExchange {
+    secret: StaticSecret,
+    pub public: [u8; 32],
+}
+
+impl KeyExchange {
+    /// Génère une nouvelle paire éphémère.
+    pub fn new() -> Self {
+        let secret = StaticSecret::random_from_rng(OsRng);
+        let public = PublicKey::from(&secret).to_bytes();
+        Self { secret, public }
+    }
+
+    /// Calcule le secret partagé ECDH à partir de la clé publique du pair.
+    pub fn shared_secret(&self, peer_public: &[u8]) -> NidanResult<[u8; 32]> {
+        if peer_public.len() != 32 {
+            return Err(NidanError::Crypto(format!(
+                "clé publique X25519 invalide: {} bytes attendus, {} reçus",
+                32,
+                peer_public.len()
+            )));
+        }
+        let mut pk = [0u8; 32];
+        pk.copy_from_slice(peer_public);
+        let peer = PublicKey::from(pk);
+        let shared = self.secret.diffie_hellman(&peer);
+        Ok(shared.to_bytes())
+    }
+}
+
+impl Default for KeyExchange {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// EphemeralSecret est importé pour documenter l'intention ; StaticSecret est
+// utilisé car il permet de conserver le secret jusqu'au calcul du shared secret
+// après réception de la clé publique du pair (l'éphémère est consommé à l'usage).
+#[allow(unused_imports)]
+use EphemeralSecret as _UnusedEphemeral;
+
 /// Contexte HKDF pour la dérivation des clés de session
 const HKDF_INFO_VIDEO: &[u8] = b"nidan-v1-video-stream";
 const HKDF_INFO_AUDIO: &[u8] = b"nidan-v1-audio-stream";
@@ -215,4 +263,50 @@ mod tests {
         assert_ne!(keys.video.key, keys.control.key);
         assert_ne!(keys.audio.key, keys.control.key);
     }
+
+    #[test]
+    fn test_x25519_ecdh_shared_secret() {
+        // Deux parties génèrent leurs paires
+        let client = KeyExchange::new();
+        let server = KeyExchange::new();
+
+        // Chacun calcule le secret partagé avec la clé publique de l'autre
+        let client_shared = client.shared_secret(&server.public).unwrap();
+        let server_shared = server.shared_secret(&client.public).unwrap();
+
+        // Les deux secrets doivent être identiques (propriété ECDH)
+        assert_eq!(client_shared, server_shared, "les secrets ECDH divergent");
+        assert_ne!(client_shared, [0u8; 32], "secret nul");
+    }
+
+    #[test]
+    fn test_full_e2e_handshake_and_encrypt() {
+        // Simule le handshake complet client <-> serveur
+        let client_kx = KeyExchange::new();
+        let server_kx = KeyExchange::new();
+        let client_nonce = random_bytes(32);
+        let server_nonce = random_bytes(32);
+
+        // Chaque côté calcule le secret partagé
+        let client_secret = client_kx.shared_secret(&server_kx.public).unwrap();
+        let server_secret = server_kx.shared_secret(&client_kx.public).unwrap();
+        assert_eq!(client_secret, server_secret);
+
+        // Chaque côté dérive les mêmes clés de session
+        let client_keys = derive_session_keys(&client_secret, &client_nonce, &server_nonce).unwrap();
+        let server_keys = derive_session_keys(&server_secret, &client_nonce, &server_nonce).unwrap();
+        assert_eq!(client_keys.video.as_bytes(), server_keys.video.as_bytes());
+
+        // Le serveur chiffre une "frame vidéo", le client la déchiffre
+        let mut server_cipher = StreamCipher::new(&server_keys.video);
+        let client_cipher = StreamCipher::new(&client_keys.video);
+
+        let frame = b"frame video H.264 confidentielle";
+        let (ciphertext, nonce) = server_cipher.encrypt(frame).unwrap();
+        assert_ne!(&ciphertext[..], &frame[..], "le texte n'est pas chiffré");
+
+        let decrypted = client_cipher.decrypt(&ciphertext, &nonce).unwrap();
+        assert_eq!(&decrypted[..], &frame[..], "déchiffrement E2E incorrect");
+    }
+
 }
