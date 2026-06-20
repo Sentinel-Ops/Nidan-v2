@@ -71,7 +71,7 @@ fn run_sdl2_real(
 
     let texture_creator = canvas.texture_creator();
     let mut texture = texture_creator
-        .create_texture_streaming(PixelFormatEnum::BGR24, initial_width, initial_height)
+        .create_texture_streaming(PixelFormatEnum::ABGR8888, initial_width, initial_height)
         .context("création texture SDL2")?;
 
     let mut event_pump = sdl_context.event_pump()
@@ -195,18 +195,17 @@ fn run_sdl2_real(
                 debug!(w, h, "changement de résolution");
             }
 
-            texture.with_lock(None, |buf, _pitch| {
-                // Copie BGRA → BGR (SDL2 BGR24)
-                // TODO Phase 2.1 : optimiser avec SIMD
+            texture.with_lock(None, |buf, pitch| {
+                // BGRA → ABGR8888 : copie directe ligne par ligne (gère le pitch SDL)
                 let src = &frame.data;
-                let mut dst_idx = 0;
-                let mut src_idx = 0;
-                while src_idx + 3 < src.len() && dst_idx + 2 < buf.len() {
-                    buf[dst_idx]     = src[src_idx];     // B
-                    buf[dst_idx + 1] = src[src_idx + 1]; // G
-                    buf[dst_idx + 2] = src[src_idx + 2]; // R
-                    dst_idx += 3;
-                    src_idx += 4; // skip A
+                let row_bytes = (w as usize) * 4;
+                for y in 0..(h as usize) {
+                    let src_start = y * row_bytes;
+                    let dst_start = y * pitch;
+                    if src_start + row_bytes <= src.len() && dst_start + row_bytes <= buf.len() {
+                        buf[dst_start..dst_start + row_bytes]
+                            .copy_from_slice(&src[src_start..src_start + row_bytes]);
+                    }
                 }
             }).map_err(|e| anyhow::anyhow!("texture lock: {}", e))?;
 

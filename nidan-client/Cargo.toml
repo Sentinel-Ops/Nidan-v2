@@ -34,10 +34,12 @@ clap         = { workspace = true }
 
 openh264 = { version = "0.6", optional = true }
 
+sdl2 = { version = "0.36", optional = true }
+
 [features]
 default        = ["stub"]
 stub           = []
 full           = ["sdl2-renderer", "openh264"]
-sdl2-renderer  = []
+sdl2-renderer  = ["dep:sdl2"]
 ffmpeg         = []
 openh264       = ["dep:openh264"]
