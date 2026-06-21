@@ -13,6 +13,7 @@ mod input;
 mod config;
 mod encoder;
 mod session;
+mod session_token;
 mod stream;
 
 use config::ServerConfig;

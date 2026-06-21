@@ -23,6 +23,7 @@ rustls-pemfile = { workspace = true }
 chacha20poly1305 = { workspace = true }
 rand         = { workspace = true }
 serde        = { workspace = true }
+jsonwebtoken = { workspace = true }
 serde_json   = { workspace = true }
 anyhow       = { workspace = true }
 thiserror    = { workspace = true }
@@ -43,3 +44,6 @@ full        = ["x11-capture", "openh264"]
 x11-capture = ["dep:x11rb"]
 ffmpeg      = []
 openh264    = ["dep:openh264"]
+
+[dev-dependencies]
+chrono = { workspace = true }

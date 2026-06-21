@@ -73,6 +73,13 @@ pub struct SecurityConfig {
     /// Token de session attendu (fourni par le broker)
     /// En production, validé cryptographiquement — ici stocké pour dev
     pub session_token_file: Option<String>,
+    /// Secret partagé avec le broker pour vérifier les JWT de session (HS256)
+    #[serde(default)]
+    pub jwt_secret: String,
+    /// Exiger un JWT valide du broker pour accepter une session
+    /// (false en mode --direct/dev où il n'y a pas de broker)
+    #[serde(default)]
+    pub require_session_token: bool,
 }
 
 impl ServerConfig {
@@ -137,6 +144,8 @@ impl Default for ServerConfig {
                 seccomp_enabled:  true,
                 e2e_encryption:   true,
                 session_token_file: None,
+                jwt_secret:          String::new(),
+                require_session_token: false,
             },
         }
     }

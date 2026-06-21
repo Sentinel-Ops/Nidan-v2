@@ -148,10 +148,10 @@ impl NidanClient {
         shutdown: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
         // ── Connexion ──────────────────────────────────────────────────────
-        let server_addr = if let Some(ref direct) = self.config.network.direct_server {
-            // Mode direct (dev) : bypass broker
+        let (server_addr, session_token) = if let Some(ref direct) = self.config.network.direct_server {
+            // Mode direct (dev) : bypass broker, pas de token
             info!(addr = %direct, "connexion directe au serveur (mode dev)");
-            direct.clone()
+            (direct.clone(), Vec::new())
         } else {
             // Mode normal : broker → session token → adresse serveur
             self.connect_via_broker().await
@@ -172,7 +172,7 @@ impl NidanClient {
         info!(remote = %conn.remote_address(), "connexion QUIC serveur établie");
 
         // ── Handshake ──────────────────────────────────────────────────────
-        let (ack, mut video_cipher, mut control_cipher) = Self::do_handshake(&conn, &self.config).await
+        let (ack, mut video_cipher, mut control_cipher) = Self::do_handshake(&conn, &self.config, &session_token).await
             .context("handshake serveur")?;
 
         // Priorité : config forcée > résolution annoncée par le serveur > défaut
@@ -288,18 +288,89 @@ impl NidanClient {
         Ok(())
     }
 
-    /// Connexion au broker pour obtenir session token + adresse serveur
-    async fn connect_via_broker(&self) -> Result<String> {
-        // TODO Phase 2.1 : implémentation complète
-        // Pour l'instant : utilise l'adresse broker directement comme serveur
-        warn!("connexion broker non implémentée — connexion directe via adresse broker");
-        Ok(self.config.network.broker_addr.clone())
+    /// Connexion au broker pour obtenir session token + adresse serveur.
+    ///
+    /// Flux : QUIC vers le broker → ClientSessionRequest (auth) →
+    /// BrokerSessionResponse (adresse VM + JWT). Le broker authentifie et
+    /// attribue une VM, puis le client se connecte directement au serveur
+    /// retourné (la session E2E reste opaque au broker).
+    async fn connect_via_broker(&self) -> Result<(String, Vec<u8>)> {
+        use nidan_proto::{ClientSessionRequest, BrokerSessionResponse, AuthResult};
+
+        let broker_addr: SocketAddr = self.config.network.broker_addr.parse()
+            .with_context(|| format!("adresse broker invalide: {}", self.config.network.broker_addr))?;
+
+        info!(addr = %broker_addr, "connexion au broker");
+        let timeout = Duration::from_secs(self.config.network.connect_timeout_secs);
+        let conn = tokio::time::timeout(
+            timeout,
+            self.endpoint.connect(broker_addr, "nidan-broker")?,
+        ).await
+            .context("timeout connexion broker")?
+            .context("connexion QUIC broker")?;
+
+        // Ouvre un stream bi : envoie la requête, attend la réponse
+        let (mut tx, mut rx) = conn.open_bi().await
+            .context("ouverture stream broker")?;
+
+        // auth_method : 1 = mTLS (le certificat client porte déjà l'identité)
+        let request = ClientSessionRequest {
+            client_version:   env!("CARGO_PKG_VERSION").to_string(),
+            auth_method:      1, // mTLS
+            auth_token:       vec![],
+            preferred_vm_tag: self.config.network.preferred_vm_tag.clone(),
+            session_label:    self.config.display.window_title.clone(),
+            client_nonce:     vec![],
+        };
+        let req_bytes = serde_json::to_vec(&request)?;
+        tx.write_all(&(req_bytes.len() as u32).to_be_bytes()).await?;
+        tx.write_all(&req_bytes).await?;
+        tx.finish().ok();
+
+        // Réception de la réponse
+        let mut len_buf = [0u8; 4];
+        rx.read_exact(&mut len_buf).await.context("lecture longueur réponse broker")?;
+        let len = u32::from_be_bytes(len_buf) as usize;
+        if len > 8192 { anyhow::bail!("réponse broker trop grande: {len}"); }
+        let mut buf = vec![0u8; len];
+        rx.read_exact(&mut buf).await.context("lecture réponse broker")?;
+        let resp: BrokerSessionResponse = nidan_proto::decode_message(&buf)
+            .context("décodage réponse broker")?;
+
+        // Fermeture propre de la connexion broker (la session passe en direct)
+        conn.close(0u32.into(), b"broker handshake done");
+
+        match resp.auth_result {
+            x if x == AuthResult::Success as i32 => {
+                if resp.server_address.is_empty() {
+                    anyhow::bail!("broker : succès mais adresse serveur vide");
+                }
+                info!(
+                    vm_id = %resp.vm_id,
+                    server = %resp.server_address,
+                    token_len = resp.session_token.len(),
+                    "broker : VM attribuée, session autorisée"
+                );
+                // Le JWT sera présenté au serveur dans le handshake
+                Ok((resp.server_address, resp.session_token))
+            }
+            x if x == AuthResult::MfaNeeded as i32 => {
+                anyhow::bail!("broker : MFA requis ({})", resp.error_message);
+            }
+            x if x == AuthResult::Expired as i32 => {
+                anyhow::bail!("broker : session expirée ({})", resp.error_message);
+            }
+            _ => {
+                anyhow::bail!("broker : authentification refusée ({})", resp.error_message);
+            }
+        }
     }
 
     /// Handshake client → serveur
     async fn do_handshake(
         conn: &quinn::Connection,
         config: &ClientConfig,
+        session_token: &[u8],
     ) -> Result<(ServerHandshakeAck, Option<nidan_common::crypto::StreamCipher>, Option<nidan_common::crypto::StreamCipher>)> {
         let (mut tx, mut rx) = conn.open_bi().await
             .context("ouverture stream handshake")?;
@@ -319,6 +390,7 @@ impl NidanClient {
             seamless_mode:       config.display.seamless,
             client_public_key:   if config.security.e2e_encryption { client_kx.public.to_vec() } else { vec![] },
             client_nonce:        if config.security.e2e_encryption { client_nonce.clone() } else { vec![] },
+            session_token:       session_token.to_vec(),
             ..Default::default()
         };
 

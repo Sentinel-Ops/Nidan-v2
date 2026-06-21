@@ -170,6 +170,30 @@ impl QuicServer {
         let (handshake, mut hs_tx) = Self::receive_handshake(&conn).await
             .context("réception handshake")?;
 
+        // Vérification du jeton de session délivré par le broker (si exigé).
+        // Empêche un client de contourner le broker en se connectant directement.
+        if config.security.require_session_token {
+            let token = String::from_utf8_lossy(&handshake.session_token);
+            match crate::session_token::verify_session_token(&token, &config.security.jwt_secret) {
+                Ok(claims) => {
+                    info!(
+                        user = %claims.sub, vm = %claims.vm_id,
+                        "jeton de session broker validé"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, client = %remote, "jeton de session refusé — session rejetée");
+                    let nack = ServerHandshakeAck {
+                        accepted: false,
+                        error_message: "jeton de session invalide ou absent".to_string(),
+                        ..Default::default()
+                    };
+                    let _ = Self::send_ack(&mut hs_tx, &nack).await;
+                    anyhow::bail!("jeton de session refusé");
+                }
+            }
+        }
+
         let session_id = SessionId::new();
         info!(session_id = %session_id, client = %remote, "session démarrée");
 
