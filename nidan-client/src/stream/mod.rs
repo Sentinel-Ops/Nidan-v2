@@ -232,6 +232,16 @@ impl NidanClient {
         let (mut ctrl_tx, mut ctrl_rx) = conn.open_bi().await
             .context("ouverture stream contrôle QUIC")?;
 
+        // Propriétaire de la sélection X CLIPBOARD du poste local : permet de
+        // coller (Ctrl+V) le presse-papier reçu du serveur. Best-effort : sous
+        // Wayland ou sans X, il reste None et le presse-papier est seulement
+        // journalisé. Utilise le display local par défaut ($DISPLAY).
+        #[cfg(feature = "x11-clipboard")]
+        let local_clipboard = match crate::clipboard_x11::ClipboardOwner::start_default() {
+            Ok(owner) => { info!("presse-papier local actif (collage sur le poste)"); Some(owner) }
+            Err(e) => { warn!(error = %e, "presse-papier local indisponible (Wayland/sans X ?)"); None }
+        };
+
         // QUIC n'expose le stream bi au pair qu'au premier octet écrit. On envoie
         // une trame d'ouverture (type CTRL_MSG_OPEN) pour que le serveur fasse
         // aboutir son accept_bi() immédiatement — sinon le sens serveur→client
@@ -330,10 +340,17 @@ impl NidanClient {
                             if let Some(payload) = payload {
                                 if msg_type == nidan_proto::CTRL_MSG_CLIPBOARD {
                                     match serde_json::from_slice::<nidan_proto::ClipboardTransferRequest>(&payload) {
-                                        Ok(req) => info!(
-                                            bytes = req.content.len(),
-                                            "presse-papier reçu du serveur (serveur→client)"
-                                        ),
+                                        Ok(req) => {
+                                            info!(
+                                                bytes = req.content.len(),
+                                                "presse-papier reçu du serveur (serveur→client)"
+                                            );
+                                            // Écriture dans la sélection X locale → collable (Ctrl+V)
+                                            #[cfg(feature = "x11-clipboard")]
+                                            if let Some(ref owner) = local_clipboard {
+                                                owner.set_content(&req.content);
+                                            }
+                                        }
                                         Err(e) => warn!(error = %e, "décodage clipboard s2c"),
                                     }
                                 }

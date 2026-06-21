@@ -26,6 +26,8 @@ mod input;
 mod renderer;
 mod session;
 mod stream;
+#[cfg(feature = "x11-clipboard")]
+mod clipboard_x11;
 
 use config::ClientConfig;
 
