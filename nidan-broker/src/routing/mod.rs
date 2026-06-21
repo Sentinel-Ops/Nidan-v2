@@ -115,6 +115,11 @@ async fn handle_client(
 
     // Extraction de l'identité mTLS depuis le certificat TLS
     let cert_identity = crate::auth::mtls::extract_peer_identity(&conn);
+    if let Some(ref dn) = cert_identity {
+        info!(client_dn = %dn, "identité mTLS extraite du certificat client");
+    } else {
+        info!("aucune identité mTLS (connexion sans certificat client)");
+    }
 
     // Authentification
     let auth_method = AuthMethod::try_from(request.auth_method)
