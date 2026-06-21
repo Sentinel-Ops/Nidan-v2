@@ -29,6 +29,7 @@ pub struct InputInjector {
     height: u32,
     is_stub: bool,
     injected: u64,
+    clipboard: Vec<u8>,
 }
 
 impl InputInjector {
@@ -53,13 +54,13 @@ impl InputInjector {
             let root = conn.setup().roots[screen_num].root;
             tracing::info!(display = display_number, "injecteur d'inputs XTEST initialisé");
 
-            Ok(Self { conn, root, width, height, is_stub: false, injected: 0 })
+            Ok(Self { conn, root, width, height, is_stub: false, injected: 0, clipboard: Vec::new() })
         }
 
         #[cfg(not(feature = "x11-capture"))]
         {
             warn!("InputInjector en mode stub (feature x11-capture désactivée)");
-            Ok(Self { width, height, is_stub: true, injected: 0 })
+            Ok(Self { width, height, is_stub: true, injected: 0, clipboard: Vec::new() })
         }
     }
 
@@ -150,5 +151,22 @@ impl InputInjector {
 
     pub fn injected_count(&self) -> u64 {
         self.injected
+    }
+
+    /// Définit le contenu du presse-papier de la VM (sélection X CLIPBOARD).
+    ///
+    /// Le contenu a déjà été filtré par la politique avant d'arriver ici.
+    /// Note : la prise de possession complète de la sélection X (réponse
+    /// asynchrone aux `SelectionRequest`) est un raffinement ultérieur ;
+    /// cette méthode valide la réception et conserve le contenu courant.
+    pub fn set_clipboard(&mut self, content: &[u8]) -> Result<()> {
+        self.clipboard = content.to_vec();
+        debug!(bytes = content.len(), "presse-papier de la VM mis à jour");
+        Ok(())
+    }
+
+    /// Dernier contenu de presse-papier reçu (après filtrage).
+    pub fn clipboard(&self) -> &[u8] {
+        &self.clipboard
     }
 }

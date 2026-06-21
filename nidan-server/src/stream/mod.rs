@@ -340,6 +340,15 @@ impl QuicServer {
         let inj_w = caps.width;
         let inj_h = caps.height;
         let input_cipher = control_cipher;
+        // Filtre de presse-papier construit depuis la politique de session.
+        let clip_filter = nidan_common::clipboard::ClipboardFilter::new(config.clipboard.clone());
+        tracing::info!(
+            c2s = config.clipboard.allow_client_to_server,
+            s2c = config.clipboard.allow_server_to_client,
+            patterns = config.clipboard.blocked_patterns.len(),
+            "filtre presse-papier actif (canal de contrôle)"
+        );
+        let clip_session_id = session_id.to_string();
         tokio::spawn(async move {
             // Accepter le stream de contrôle bi-directionnel ouvert par le client
             let mut ctrl_rx = match input_conn.accept_bi().await {
@@ -362,28 +371,68 @@ impl QuicServer {
                 if ctrl_rx.read_exact(&mut buf).await.is_err() { break; }
                 if buf.is_empty() { continue; }
 
-                // Format : [flag 1o][si chiffré: nonce 12o][payload]
-                let flag = buf[0];
-                let json: Vec<u8> = if flag == 1 {
-                    // Chiffré : extraire nonce (12o) + ciphertext
-                    if buf.len() < 1 + 12 { tracing::debug!("trame inputs chiffrée trop courte"); continue; }
-                    let nonce = &buf[1..13];
-                    let ct = &buf[13..];
+                // Format : [msg_type 1o][flag 1o][si chiffré: nonce 12o][payload]
+                if buf.len() < 2 { tracing::debug!("trame de contrôle trop courte"); continue; }
+                let msg_type = buf[0];
+                let flag = buf[1];
+                let payload: Vec<u8> = if flag == 1 {
+                    // Chiffré : nonce (12o) + ciphertext, après les 2 octets d'en-tête
+                    if buf.len() < 2 + 12 { tracing::debug!("trame chiffrée trop courte"); continue; }
+                    let nonce = &buf[2..14];
+                    let ct = &buf[14..];
                     match input_cipher.as_ref() {
                         Some(cipher) => match cipher.decrypt(ct, nonce) {
                             Ok(pt) => pt,
-                            Err(e) => { tracing::warn!(error = %e, "déchiffrement inputs échoué"); continue; }
+                            Err(e) => { tracing::warn!(error = %e, "déchiffrement contrôle échoué"); continue; }
                         },
-                        None => { tracing::warn!("inputs chiffrés mais pas de clé contrôle"); continue; }
+                        None => { tracing::warn!("trame chiffrée mais pas de clé contrôle"); continue; }
                     }
                 } else {
-                    // En clair : payload = tout après le flag
-                    buf[1..].to_vec()
+                    // En clair : payload = tout après les 2 octets d'en-tête
+                    buf[2..].to_vec()
                 };
 
-                match serde_json::from_slice::<nidan_proto::InputBatch>(&json) {
-                    Ok(batch) => { let _ = injector.inject_batch(&batch); }
-                    Err(e) => tracing::debug!(error = %e, "décodage InputBatch"),
+                match msg_type {
+                    nidan_proto::CTRL_MSG_INPUT => {
+                        match serde_json::from_slice::<nidan_proto::InputBatch>(&payload) {
+                            Ok(batch) => { let _ = injector.inject_batch(&batch); }
+                            Err(e) => tracing::debug!(error = %e, "décodage InputBatch"),
+                        }
+                    }
+                    nidan_proto::CTRL_MSG_CLIPBOARD => {
+                        match serde_json::from_slice::<nidan_proto::ClipboardTransferRequest>(&payload) {
+                            Ok(req) => {
+                                let mime = nidan_proto::clip_mime_to_str(req.mime_type);
+                                let decision = clip_filter.evaluate_proto(
+                                    req.direction, mime, &req.content);
+                                match decision {
+                                    nidan_common::clipboard::ClipboardDecision::Allow => {
+                                        if clip_filter.audit_enabled() {
+                                            tracing::info!(
+                                                session = %clip_session_id,
+                                                mime = %mime,
+                                                size = req.content.len(),
+                                                "presse-papier accepté (filtre OK)"
+                                            );
+                                        }
+                                        // Injection effective dans la VM (sélection X)
+                                        let _ = injector.set_clipboard(&req.content);
+                                    }
+                                    nidan_common::clipboard::ClipboardDecision::Block(reason) => {
+                                        tracing::warn!(
+                                            session = %clip_session_id,
+                                            mime = %mime,
+                                            size = req.content.len(),
+                                            reason = %reason,
+                                            "presse-papier REFUSÉ par le filtre"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => tracing::debug!(error = %e, "décodage ClipboardTransfer"),
+                        }
+                    }
+                    other => tracing::debug!(msg_type = other, "type de message de contrôle inconnu"),
                 }
             }
             tracing::info!(injected = injector.injected_count(), "réception d'inputs terminée");

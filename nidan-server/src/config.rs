@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use nidan_common::config::{TlsConfig, VideoConfig, AuditConfig};
+use nidan_common::config::{TlsConfig, VideoConfig, AuditConfig, ClipboardPolicy};
 
 /// Configuration complète du serveur
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +22,9 @@ pub struct ServerConfig {
     pub audit: Option<AuditConfig>,
     /// Configuration de sécurité (seccomp, sandbox)
     pub security: SecurityConfig,
+    /// Politique de filtrage du presse-papier (optionnelle)
+    #[serde(default)]
+    pub clipboard: ClipboardPolicy,
 }
 
 /// Configuration réseau du serveur
@@ -147,6 +150,7 @@ impl Default for ServerConfig {
                 jwt_secret:          String::new(),
                 require_session_token: false,
             },
+            clipboard: ClipboardPolicy::default(),
         }
     }
 }

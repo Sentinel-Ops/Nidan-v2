@@ -11,6 +11,7 @@ repository.workspace = true
 nidan-proto = { path = "../nidan-proto" }
 prost       = { workspace = true }
 serde       = { workspace = true }
+regex = { workspace = true }
 serde_json  = { workspace = true }
 anyhow      = { workspace = true }
 thiserror   = { workspace = true }

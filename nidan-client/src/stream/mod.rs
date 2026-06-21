@@ -232,6 +232,24 @@ impl NidanClient {
         let (mut ctrl_tx, mut ctrl_rx) = conn.open_bi().await
             .context("ouverture stream contrôle QUIC")?;
 
+        // Hook de test : si NIDAN_TEST_CLIPBOARD est défini, envoyer son contenu
+        // comme transfert de presse-papier (client → serveur) puis continuer.
+        // Permet de valider le canal de bout en bout sans capture X réelle.
+        if let Ok(test_clip) = std::env::var("NIDAN_TEST_CLIPBOARD") {
+            // Ouvrir le stream de contrôle côté serveur en envoyant d'abord
+            // une trame, puis le transfert clipboard.
+            match Self::send_clipboard(
+                &mut ctrl_tx,
+                "test-session",
+                nidan_proto::CLIP_MIME_TEXT_PLAIN,
+                test_clip.as_bytes(),
+                control_cipher.as_mut(),
+            ).await {
+                Ok(()) => info!(bytes = test_clip.len(), "presse-papier de test envoyé au serveur"),
+                Err(e) => warn!(error = %e, "échec envoi presse-papier de test"),
+            }
+        }
+
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => {
@@ -452,25 +470,65 @@ impl NidanClient {
         cipher: Option<&mut nidan_common::crypto::StreamCipher>,
     ) -> Result<()> {
         let json = serde_json::to_vec(batch)?;
-        // Format fil : [flag 1o][si chiffré: nonce 12o][payload]
-        // flag = 0 → JSON en clair, flag = 1 → ChaCha20-Poly1305
-        let framed = match cipher {
+        // Format fil : [msg_type 1o][flag 1o][si chiffré: nonce 12o][payload]
+        // msg_type = CTRL_MSG_INPUT, flag = 0 → JSON clair, flag = 1 → ChaCha20-Poly1305
+        let framed = Self::frame_control_message(
+            nidan_proto::CTRL_MSG_INPUT, &json, cipher)?;
+        tx.write_all(&(framed.len() as u32).to_be_bytes()).await?;
+        tx.write_all(&framed).await?;
+        Ok(())
+    }
+
+    /// Construit une trame de canal de contrôle : `[msg_type][flag][...]`.
+    /// Réutilisé pour les inputs et le presse-papier (même chiffrement E2E).
+    fn frame_control_message(
+        msg_type: u8,
+        payload: &[u8],
+        cipher: Option<&mut nidan_common::crypto::StreamCipher>,
+    ) -> Result<Vec<u8>> {
+        let body = match cipher {
             Some(c) => {
-                let (ct, nonce) = c.encrypt(&json)
-                    .map_err(|e| anyhow::anyhow!("chiffrement inputs: {e}"))?;
-                let mut out = Vec::with_capacity(1 + nonce.len() + ct.len());
-                out.push(1u8);
+                let (ct, nonce) = c.encrypt(payload)
+                    .map_err(|e| anyhow::anyhow!("chiffrement control: {e}"))?;
+                let mut out = Vec::with_capacity(2 + nonce.len() + ct.len());
+                out.push(msg_type);
+                out.push(1u8); // chiffré
                 out.extend_from_slice(&nonce);
                 out.extend_from_slice(&ct);
                 out
             }
             None => {
-                let mut out = Vec::with_capacity(1 + json.len());
-                out.push(0u8);
-                out.extend_from_slice(&json);
+                let mut out = Vec::with_capacity(2 + payload.len());
+                out.push(msg_type);
+                out.push(0u8); // clair
+                out.extend_from_slice(payload);
                 out
             }
         };
+        Ok(body)
+    }
+
+    /// Envoie un transfert de presse-papier au serveur sur le canal de contrôle.
+    /// Le filtrage de politique est appliqué côté serveur (et idéalement ici aussi).
+    async fn send_clipboard(
+        tx: &mut quinn::SendStream,
+        session_id: &str,
+        mime_code: i32,
+        content: &[u8],
+        cipher: Option<&mut nidan_common::crypto::StreamCipher>,
+    ) -> Result<()> {
+        use nidan_proto::ClipboardTransferRequest;
+        let req = ClipboardTransferRequest {
+            session_id:   session_id.to_string(),
+            direction:    nidan_proto::CLIP_DIR_CLIENT_TO_SERVER,
+            mime_type:    mime_code,
+            content:      content.to_vec(),
+            content_hash: 0,
+            size_bytes:   content.len() as u32,
+        };
+        let json = serde_json::to_vec(&req)?;
+        let framed = Self::frame_control_message(
+            nidan_proto::CTRL_MSG_CLIPBOARD, &json, cipher)?;
         tx.write_all(&(framed.len() as u32).to_be_bytes()).await?;
         tx.write_all(&framed).await?;
         Ok(())

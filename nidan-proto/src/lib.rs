@@ -13,6 +13,30 @@ pub const DEFAULT_BROKER_PORT: u16 = 7443;
 pub const DEFAULT_SERVER_PORT: u16 = 7444;
 pub const MAX_VIDEO_FRAME_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
+
+/// Types de message sur le canal de contrôle (1er octet de trame).
+pub const CTRL_MSG_INPUT: u8 = 0x01;
+pub const CTRL_MSG_CLIPBOARD: u8 = 0x02;
+
+/// Codes de direction du presse-papier (champ `direction`).
+pub const CLIP_DIR_CLIENT_TO_SERVER: i32 = 1;
+pub const CLIP_DIR_SERVER_TO_CLIENT: i32 = 2;
+
+/// Codes de type MIME du presse-papier (champ `mime_type`).
+pub const CLIP_MIME_TEXT_PLAIN: i32 = 0;
+pub const CLIP_MIME_TEXT_HTML: i32 = 1;
+pub const CLIP_MIME_IMAGE_PNG: i32 = 2;
+pub const CLIP_MIME_OCTET_STREAM: i32 = 3;
+
+/// Convertit un code MIME proto en chaîne MIME standard.
+pub fn clip_mime_to_str(code: i32) -> &'static str {
+    match code {
+        CLIP_MIME_TEXT_PLAIN => "text/plain",
+        CLIP_MIME_TEXT_HTML  => "text/html",
+        CLIP_MIME_IMAGE_PNG  => "image/png",
+        _                    => "application/octet-stream",
+    }
+}
 pub const CHACHA20_NONCE_SIZE: usize = 12;
 pub const SESSION_KEY_SIZE: usize = 32;
 pub const EXCHANGE_NONCE_SIZE: usize = 32;

@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
 
+pub mod clipboard;
 pub mod config;
 pub mod crypto;
 pub mod error;
