@@ -30,6 +30,8 @@ pub struct InputInjector {
     is_stub: bool,
     injected: u64,
     clipboard: Vec<u8>,
+    #[cfg(feature = "x11-capture")]
+    clipboard_owner: Option<crate::clipboard_x11::ClipboardOwner>,
 }
 
 impl InputInjector {
@@ -54,7 +56,14 @@ impl InputInjector {
             let root = conn.setup().roots[screen_num].root;
             tracing::info!(display = display_number, "injecteur d'inputs XTEST initialisé");
 
-            Ok(Self { conn, root, width, height, is_stub: false, injected: 0, clipboard: Vec::new() })
+            // Démarrage du propriétaire de sélection CLIPBOARD (best-effort :
+            // si ça échoue, l'injection d'inputs reste fonctionnelle).
+            let clipboard_owner = match crate::clipboard_x11::ClipboardOwner::start(display_number) {
+                Ok(owner) => { tracing::info!("propriétaire CLIPBOARD actif (collage dans la VM)"); Some(owner) }
+                Err(e) => { warn!(error = %e, "propriétaire CLIPBOARD indisponible"); None }
+            };
+
+            Ok(Self { conn, root, width, height, is_stub: false, injected: 0, clipboard: Vec::new(), clipboard_owner })
         }
 
         #[cfg(not(feature = "x11-capture"))]
@@ -161,6 +170,12 @@ impl InputInjector {
     /// cette méthode valide la réception et conserve le contenu courant.
     pub fn set_clipboard(&mut self, content: &[u8]) -> Result<()> {
         self.clipboard = content.to_vec();
+        // Rendre le contenu disponible au collage (Ctrl+V) dans la VM via la
+        // sélection X CLIPBOARD, si le propriétaire est actif.
+        #[cfg(feature = "x11-capture")]
+        if let Some(ref owner) = self.clipboard_owner {
+            owner.set_content(content);
+        }
         debug!(bytes = content.len(), "presse-papier de la VM mis à jour");
         Ok(())
     }

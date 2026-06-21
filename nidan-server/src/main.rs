@@ -14,6 +14,8 @@ mod config;
 mod encoder;
 mod session;
 mod session_token;
+#[cfg(feature = "x11-capture")]
+mod clipboard_x11;
 mod stream;
 
 use config::ServerConfig;
