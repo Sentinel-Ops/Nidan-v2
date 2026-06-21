@@ -232,6 +232,16 @@ impl NidanClient {
         let (mut ctrl_tx, mut ctrl_rx) = conn.open_bi().await
             .context("ouverture stream contrôle QUIC")?;
 
+        // QUIC n'expose le stream bi au pair qu'au premier octet écrit. On envoie
+        // une trame d'ouverture (type CTRL_MSG_OPEN) pour que le serveur fasse
+        // aboutir son accept_bi() immédiatement — sinon le sens serveur→client
+        // (presse-papier) reste bloqué tant que le client n'a rien à envoyer.
+        {
+            let open_frame: [u8; 2] = [nidan_proto::CTRL_MSG_OPEN, 0u8];
+            let _ = ctrl_tx.write_all(&(open_frame.len() as u32).to_be_bytes()).await;
+            let _ = ctrl_tx.write_all(&open_frame).await;
+        }
+
         // Hook de test : si NIDAN_TEST_CLIPBOARD est défini, envoyer son contenu
         // comme transfert de presse-papier (client → serveur) puis continuer.
         // Permet de valider le canal de bout en bout sans capture X réelle.
@@ -296,6 +306,41 @@ impl NidanClient {
                 Some(batch) = rx_batch.recv() => {
                     if let Err(e) = Self::send_input_batch(&mut ctrl_tx, &batch, control_cipher.as_mut()).await {
                         warn!(error = %e, "erreur envoi inputs");
+                    }
+                }
+
+                // Trame entrante sur le canal de contrôle (presse-papier serveur→client)
+                frame = Self::read_control_frame(&mut ctrl_rx) => {
+                    match frame {
+                        Ok(Some((msg_type, flag, raw))) => {
+                            // Déchiffrement si nécessaire (flag == 1)
+                            let payload: Option<Vec<u8>> = if flag == 1 {
+                                if raw.len() < 12 { None }
+                                else {
+                                    let nonce = &raw[..12];
+                                    let ct = &raw[12..];
+                                    match control_cipher.as_ref() {
+                                        Some(c) => c.decrypt(ct, nonce).ok(),
+                                        None => { warn!("trame contrôle chiffrée mais pas de clé"); None }
+                                    }
+                                }
+                            } else {
+                                Some(raw)
+                            };
+                            if let Some(payload) = payload {
+                                if msg_type == nidan_proto::CTRL_MSG_CLIPBOARD {
+                                    match serde_json::from_slice::<nidan_proto::ClipboardTransferRequest>(&payload) {
+                                        Ok(req) => info!(
+                                            bytes = req.content.len(),
+                                            "presse-papier reçu du serveur (serveur→client)"
+                                        ),
+                                        Err(e) => warn!(error = %e, "décodage clipboard s2c"),
+                                    }
+                                }
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(_) => {}
                     }
                 }
             }
@@ -447,6 +492,23 @@ impl NidanClient {
     }
 
     /// Lit une VideoFrame length-prefixed depuis un stream QUIC
+    /// Lit une trame du canal de contrôle : `[len][msg_type][flag][reste]`.
+    /// Retourne (msg_type, flag, reste-brut) ; le déchiffrement est fait par
+    /// l'appelant (qui détient la clé). Retourne Ok(None) si trame invalide.
+    async fn read_control_frame(
+        rx: &mut quinn::RecvStream,
+    ) -> Result<Option<(u8, u8, Vec<u8>)>> {
+        let mut len_buf = [0u8; 4];
+        rx.read_exact(&mut len_buf).await.context("lecture len trame contrôle")?;
+        let len = u32::from_be_bytes(len_buf) as usize;
+        if len < 2 || len > 1_100_000 { return Ok(None); }
+        let mut buf = vec![0u8; len];
+        rx.read_exact(&mut buf).await.context("lecture trame contrôle")?;
+        let msg_type = buf[0];
+        let flag = buf[1];
+        Ok(Some((msg_type, flag, buf[2..].to_vec())))
+    }
+
     async fn read_video_frame(rx: &mut quinn::RecvStream) -> Result<VideoFrame> {
         let mut len_buf = [0u8; 4];
         rx.read_exact(&mut len_buf).await

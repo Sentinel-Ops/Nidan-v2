@@ -15,6 +15,7 @@ pub const MAX_VIDEO_FRAME_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
 
 /// Types de message sur le canal de contrôle (1er octet de trame).
+pub const CTRL_MSG_OPEN: u8 = 0x00;
 pub const CTRL_MSG_INPUT: u8 = 0x01;
 pub const CTRL_MSG_CLIPBOARD: u8 = 0x02;
 

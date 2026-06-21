@@ -286,6 +286,84 @@ impl QuicServer {
         Ok(())
     }
 
+    /// Envoie le presse-papier de la VM vers le client (sens serveur → client),
+    /// après filtrage par la politique. Trame : [CTRL_MSG_CLIPBOARD][flag][...].
+    /// Le chiffrement utilise `encrypt_dir(.., 1)` pour isoler le nonce du sens
+    /// retour de celui du sens aller.
+    async fn send_clipboard_to_client(
+        tx: &mut quinn::SendStream,
+        filter: &nidan_common::clipboard::ClipboardFilter,
+        session_id: &str,
+        content: &[u8],
+        cipher: Option<&mut nidan_common::crypto::StreamCipher>,
+    ) {
+        use nidan_proto::ClipboardTransferRequest;
+        // Filtrage côté serveur AVANT émission (sens serveur → client)
+        let mime = nidan_proto::clip_mime_to_str(nidan_proto::CLIP_MIME_TEXT_PLAIN);
+        let decision = filter.evaluate_proto(
+            nidan_proto::CLIP_DIR_SERVER_TO_CLIENT, mime, content);
+        match decision {
+            nidan_common::clipboard::ClipboardDecision::Block(reason) => {
+                tracing::warn!(
+                    session = %session_id, size = content.len(), reason = %reason,
+                    "presse-papier serveur→client REFUSÉ par le filtre (non émis)"
+                );
+                return;
+            }
+            nidan_common::clipboard::ClipboardDecision::Allow => {
+                if filter.audit_enabled() {
+                    tracing::info!(
+                        session = %session_id, size = content.len(),
+                        "presse-papier serveur→client accepté (filtre OK)"
+                    );
+                }
+            }
+        }
+
+        let req = ClipboardTransferRequest {
+            session_id:   session_id.to_string(),
+            direction:    nidan_proto::CLIP_DIR_SERVER_TO_CLIENT,
+            mime_type:    nidan_proto::CLIP_MIME_TEXT_PLAIN,
+            content:      content.to_vec(),
+            content_hash: 0,
+            size_bytes:   content.len() as u32,
+        };
+        let json = match serde_json::to_vec(&req) {
+            Ok(j) => j,
+            Err(e) => { tracing::warn!(error = %e, "sérialisation clipboard s2c"); return; }
+        };
+
+        // Framing : [msg_type][flag][si chiffré: nonce 12o][payload]
+        let framed: Vec<u8> = match cipher {
+            Some(c) => match c.encrypt_dir(&json, 1) {
+                Ok((ct, nonce)) => {
+                    let mut out = Vec::with_capacity(2 + nonce.len() + ct.len());
+                    out.push(nidan_proto::CTRL_MSG_CLIPBOARD);
+                    out.push(1u8);
+                    out.extend_from_slice(&nonce);
+                    out.extend_from_slice(&ct);
+                    out
+                }
+                Err(e) => { tracing::warn!(error = %e, "chiffrement clipboard s2c"); return; }
+            },
+            None => {
+                let mut out = Vec::with_capacity(2 + json.len());
+                out.push(nidan_proto::CTRL_MSG_CLIPBOARD);
+                out.push(0u8);
+                out.extend_from_slice(&json);
+                out
+            }
+        };
+
+        let len = (framed.len() as u32).to_be_bytes();
+        if tx.write_all(&len).await.is_err() || tx.write_all(&framed).await.is_err() {
+            tracing::warn!("échec envoi presse-papier serveur→client");
+        } else {
+            tracing::info!(session = %session_id, bytes = content.len(),
+                "presse-papier serveur→client émis");
+        }
+    }
+
     /// Boucle principale de session
     async fn run_session(
         conn: quinn::Connection,
@@ -340,6 +418,10 @@ impl QuicServer {
         let inj_w = caps.width;
         let inj_h = caps.height;
         let input_cipher = control_cipher;
+        // Chiffreur dédié au sens retour (serveur → client) : même clé de
+        // contrôle, compteur isolé, séparation des nonces via le marqueur de
+        // direction (encrypt_dir). Évite toute réutilisation de nonce.
+        let input_cipher_s2c = input_cipher.as_ref().map(|c| c.duplicate_fresh());
         // Filtre de presse-papier construit depuis la politique de session.
         let clip_filter = nidan_common::clipboard::ClipboardFilter::new(config.clipboard.clone());
         tracing::info!(
@@ -350,11 +432,23 @@ impl QuicServer {
         );
         let clip_session_id = session_id.to_string();
         tokio::spawn(async move {
-            // Accepter le stream de contrôle bi-directionnel ouvert par le client
-            let mut ctrl_rx = match input_conn.accept_bi().await {
-                Ok((_tx, rx)) => rx,
+            // Accepter le stream de contrôle bi-directionnel ouvert par le client.
+            // On conserve AUSSI la moitié émission (tx) pour le presse-papier
+            // serveur → client (sens retour).
+            let (mut ctrl_tx, mut ctrl_rx) = match input_conn.accept_bi().await {
+                Ok(pair) => pair,
                 Err(e) => { tracing::warn!(error = %e, "pas de stream de contrôle inputs"); return; }
             };
+
+            // Hook de test : si NIDAN_TEST_CLIPBOARD_S2C est défini, envoyer son
+            // contenu vers le client après filtrage (sens serveur → client).
+            if let Ok(test_clip) = std::env::var("NIDAN_TEST_CLIPBOARD_S2C") {
+                let mut clip_cipher = input_cipher_s2c;
+                Self::send_clipboard_to_client(
+                    &mut ctrl_tx, &clip_filter, &clip_session_id,
+                    test_clip.as_bytes(), clip_cipher.as_mut(),
+                ).await;
+            }
             let mut injector = match crate::input::InputInjector::new(inj_display, inj_w, inj_h) {
                 Ok(i) => i,
                 Err(e) => { tracing::warn!(error = %e, "injecteur indisponible"); return; }

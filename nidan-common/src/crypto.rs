@@ -162,12 +162,56 @@ impl StreamCipher {
         }
     }
 
+    /// Duplique le chiffreur avec un compteur remis à zéro.
+    /// Utilisé pour obtenir un chiffreur dédié au sens retour (serveur→client)
+    /// à partir de la même clé de contrôle. La séparation des nonces entre
+    /// sens est assurée par le marqueur de direction (`encrypt_dir`), pas par
+    /// le compteur — ce duplicata sert juste à isoler le compteur d'émission.
+    pub fn duplicate_fresh(&self) -> Self {
+        Self {
+            cipher: self.cipher.clone(),
+            frame_counter: 0,
+        }
+    }
+
     /// Génère le nonce pour la frame courante.
     /// Structure : [counter 8 bytes LE] [padding 4 bytes zéro]
     fn nonce_for_counter(counter: u64) -> [u8; CHACHA20_NONCE_SIZE] {
         let mut nonce = [0u8; CHACHA20_NONCE_SIZE];
         nonce[..8].copy_from_slice(&counter.to_le_bytes());
         nonce
+    }
+
+    /// Nonce avec marqueur de direction sur l'octet 8.
+    /// Garantit que deux sens opposés partageant la même clé n'utilisent
+    /// jamais le même nonce, même si leurs compteurs se recouvrent.
+    fn nonce_for_counter_dir(counter: u64, direction: u8) -> [u8; CHACHA20_NONCE_SIZE] {
+        let mut nonce = [0u8; CHACHA20_NONCE_SIZE];
+        nonce[..8].copy_from_slice(&counter.to_le_bytes());
+        nonce[8] = direction;
+        nonce
+    }
+
+    /// Chiffre avec un marqueur de direction dans le nonce.
+    /// Utilisé quand une même clé sert aux deux sens (ex. presse-papier
+    /// bidirectionnel sur le canal de contrôle) : `direction` = 0 pour
+    /// client→serveur, 1 pour serveur→client.
+    pub fn encrypt_dir(
+        &mut self,
+        plaintext: &[u8],
+        direction: u8,
+    ) -> NidanResult<(Vec<u8>, [u8; CHACHA20_NONCE_SIZE])> {
+        let nonce_bytes = Self::nonce_for_counter_dir(self.frame_counter, direction);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = self
+            .cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|e| NidanError::Crypto(format!("encrypt_dir: {}", e)))?;
+        self.frame_counter = self
+            .frame_counter
+            .checked_add(1)
+            .ok_or_else(|| NidanError::Crypto("compteur de frame saturé".to_string()))?;
+        Ok((ciphertext, nonce_bytes))
     }
 
     /// Chiffre une frame. Retourne (ciphertext, nonce).
@@ -307,6 +351,31 @@ mod tests {
 
         let decrypted = client_cipher.decrypt(&ciphertext, &nonce).unwrap();
         assert_eq!(&decrypted[..], &frame[..], "déchiffrement E2E incorrect");
+    }
+
+
+    #[test]
+    fn test_encrypt_dir_separates_nonces() {
+        // Deux chiffreurs de même clé, compteurs identiques, directions opposées
+        // → nonces DIFFÉRENTS (pas de réutilisation catastrophique).
+        let key = SessionKey::from_bytes(&[7u8; SESSION_KEY_SIZE]).unwrap();
+        let mut a = StreamCipher::new(&key);
+        let mut b = StreamCipher::new(&key);
+        let (_, nonce_c2s) = a.encrypt_dir(b"hello", 0).unwrap();
+        let (_, nonce_s2c) = b.encrypt_dir(b"hello", 1).unwrap();
+        assert_ne!(nonce_c2s, nonce_s2c, "les nonces des deux sens doivent différer");
+        assert_eq!(nonce_c2s[8], 0);
+        assert_eq!(nonce_s2c[8], 1);
+    }
+
+    #[test]
+    fn test_encrypt_dir_roundtrip() {
+        let key = SessionKey::from_bytes(&[9u8; SESSION_KEY_SIZE]).unwrap();
+        let mut enc = StreamCipher::new(&key);
+        let dec = StreamCipher::new(&key);
+        let (ct, nonce) = enc.encrypt_dir(b"presse-papier secret", 1).unwrap();
+        let pt = dec.decrypt(&ct, &nonce).unwrap();
+        assert_eq!(pt, b"presse-papier secret");
     }
 
 }
