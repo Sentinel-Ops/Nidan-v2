@@ -36,6 +36,9 @@ pub struct NetworkConfig {
     pub reconnect_delay_secs: u64,
     /// Connexion directe (dev) — bypasse le broker
     pub direct_server: Option<String>,
+    /// Tag de VM préféré (optionnel) transmis au broker
+    #[serde(default)]
+    pub preferred_vm_tag: String,
 }
 
 fn default_broker() -> String { "localhost:7443".to_string() }
@@ -139,6 +142,7 @@ impl Default for ClientConfig {
         Self {
             network: NetworkConfig {
                 broker_addr:          default_broker(),
+                preferred_vm_tag:     String::new(),
                 connect_timeout_secs: default_timeout(),
                 auto_reconnect:       true,
                 reconnect_delay_secs: default_reconnect_delay(),

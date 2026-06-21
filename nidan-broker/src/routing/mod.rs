@@ -110,7 +110,7 @@ async fn handle_client(
     }
 
     // Réception de la demande de session
-    let request = receive_session_request(&conn).await
+    let (request, mut resp_tx) = receive_session_request(&conn).await
         .context("réception session request")?;
 
     // Extraction de l'identité mTLS depuis le certificat TLS
@@ -135,7 +135,7 @@ async fn handle_client(
                 error_message: reason.to_string(),
                 ..Default::default()
             };
-            send_session_response(&conn, &resp).await?;
+            send_session_response(&mut resp_tx, &resp).await?;
             conn.close(2u32.into(), b"auth failed");
             return Ok(());
         }
@@ -146,7 +146,7 @@ async fn handle_client(
                 error_message: challenge,
                 ..Default::default()
             };
-            send_session_response(&conn, &resp).await?;
+            send_session_response(&mut resp_tx, &resp).await?;
             return Ok(());
         }
 
@@ -168,7 +168,7 @@ async fn handle_client(
                         error_message: "aucune VM disponible".to_string(),
                         ..Default::default()
                     };
-                    send_session_response(&conn, &resp).await?;
+                    send_session_response(&mut resp_tx, &resp).await?;
                     return Ok(());
                 }
             };
@@ -180,18 +180,17 @@ async fn handle_client(
                 &vm.id,
             ).context("génération session token")?;
 
-            // Nonces pour dérivation clé E2E
-            let server_nonce = nidan_common::crypto::random_bytes(32);
-            let server_pubkey = nidan_common::crypto::random_bytes(32); // TODO : vraie clé X25519
-
+            // Le broker ne participe PAS à l'échange de clés E2E : le client
+            // négocie X25519 directement avec le serveur (broker opaque au contenu).
+            // Les champs crypto restent vides côté broker, par conception.
             let resp = BrokerSessionResponse {
                 auth_result:    nidan_proto::AuthResult::Success as i32,
                 session_id:     session_id.to_string(),
                 vm_id:          vm.id.clone(),
                 server_address: vm.addr(),
                 session_token:  token.into_bytes(),
-                server_nonce:   server_nonce,
-                server_public_key: server_pubkey,
+                server_nonce:      vec![],
+                server_public_key: vec![],
                 ..Default::default()
             };
 
@@ -208,7 +207,7 @@ async fn handle_client(
                 last_seen:   chrono::Utc::now(),
             });
 
-            send_session_response(&conn, &resp).await?;
+            send_session_response(&mut resp_tx, &resp).await?;
 
             info!(
                 session_id = %session_id,
@@ -244,9 +243,12 @@ async fn handle_client(
 }
 
 /// Lit une ClientSessionRequest length-prefixed
-async fn receive_session_request(conn: &quinn::Connection) -> Result<ClientSessionRequest> {
-    let mut stream = conn.accept_bi().await.context("stream session request")?;
-    let rx = &mut stream.1;
+async fn receive_session_request(
+    conn: &quinn::Connection,
+) -> Result<(ClientSessionRequest, quinn::SendStream)> {
+    // Le client ouvre UN stream bi : il envoie la requête puis attend la
+    // réponse sur le MÊME stream. On conserve donc la moitié SEND pour répondre.
+    let (tx, mut rx) = conn.accept_bi().await.context("stream session request")?;
 
     let mut len_buf = [0u8; 4];
     rx.read_exact(&mut len_buf).await.context("lecture longueur")?;
@@ -257,16 +259,17 @@ async fn receive_session_request(conn: &quinn::Connection) -> Result<ClientSessi
     let mut buf = vec![0u8; len];
     rx.read_exact(&mut buf).await.context("lecture payload")?;
 
-    nidan_proto::decode_message::<ClientSessionRequest>(&buf).context("décodage proto")
+    let req = nidan_proto::decode_message::<ClientSessionRequest>(&buf).context("décodage proto")?;
+    Ok((req, tx))
 }
 
 /// Envoie une BrokerSessionResponse
 async fn send_session_response(
-    conn: &quinn::Connection,
+    tx: &mut quinn::SendStream,
     resp: &BrokerSessionResponse,
 ) -> Result<()> {
-    let (mut tx, _) = conn.open_bi().await.context("stream réponse")?;
-    let data = nidan_proto::encode_message(&resp)?;
+    // Sérialisation brute + préfixe longueur unique (le client lit [len][json])
+    let data = serde_json::to_vec(resp).context("sérialisation réponse")?;
     tx.write_all(&(data.len() as u32).to_be_bytes()).await?;
     tx.write_all(&data).await?;
     tx.finish().context("flush réponse")?;

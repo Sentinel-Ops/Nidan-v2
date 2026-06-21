@@ -42,6 +42,11 @@ async fn main() -> anyhow::Result<()> {
     nidan_common::logging::init("nidan-broker");
     info!(version = env!("CARGO_PKG_VERSION"), "nidan-broker démarrage");
 
+    // Provider crypto rustls (requis avant tout usage TLS/QUIC)
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
     let cfg = BrokerConfig::load(&args.config)
         .unwrap_or_else(|_| {
             info!("config non trouvée — valeurs par défaut");
