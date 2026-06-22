@@ -265,6 +265,34 @@ impl NidanClient {
             }
         }
 
+        // ── Lecteurs de streams dans des tâches dédiées (CANCEL-SAFETY) ──────
+        // read_exact n'est PAS cancel-safe : utilisé directement dans un
+        // tokio::select!, une lecture interrompue entre le préfixe et le
+        // payload perd les octets déjà lus et désynchronise le stream.
+        // On déplace chaque lecture dans sa propre tâche qui lit en boucle et
+        // pousse les trames via un channel ; le select! principal ne fait plus
+        // que des recv() de channel, qui sont cancel-safe.
+        let (tx_video_frame, mut rx_video_frame) = tokio::sync::mpsc::channel::<VideoFrame>(8);
+        let video_reader = tokio::spawn(async move {
+            loop {
+                match Self::read_video_frame(&mut video_rx).await {
+                    Ok(frame) => { if tx_video_frame.send(frame).await.is_err() { break; } }
+                    Err(e) => { warn!(error = %e, "lecture frame vidéo arrêtée"); break; }
+                }
+            }
+        });
+
+        let (tx_ctrl_frame, mut rx_ctrl_frame) = tokio::sync::mpsc::channel::<(u8, u8, Vec<u8>)>(8);
+        let ctrl_reader = tokio::spawn(async move {
+            loop {
+                match Self::read_control_frame(&mut ctrl_rx).await {
+                    Ok(Some(frame)) => { if tx_ctrl_frame.send(frame).await.is_err() { break; } }
+                    Ok(None) => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => {
@@ -277,10 +305,10 @@ impl NidanClient {
                     break;
                 }
 
-                // Réception d'une VideoFrame depuis le serveur
-                result = Self::read_video_frame(&mut video_rx) => {
-                    match result {
-                        Ok(mut frame) => {
+                // Réception d'une VideoFrame (depuis la tâche lectrice : cancel-safe)
+                maybe_frame = rx_video_frame.recv() => {
+                    match maybe_frame {
+                        Some(mut frame) => {
                             // Déchiffrement E2E si la frame est chiffrée
                             if frame.encrypted {
                                 if let Some(ref cipher) = video_cipher {
@@ -295,10 +323,7 @@ impl NidanClient {
                             }
                             if tx_dec_in.send(frame).await.is_err() { break; }
                         }
-                        Err(e) => {
-                            warn!(error = %e, "erreur lecture frame vidéo");
-                            break;
-                        }
+                        None => { warn!("flux vidéo terminé"); break; }
                     }
                 }
 
@@ -314,10 +339,9 @@ impl NidanClient {
                     }
                 }
 
-                // Trame entrante sur le canal de contrôle (presse-papier serveur→client)
-                frame = Self::read_control_frame(&mut ctrl_rx) => {
-                    match frame {
-                        Ok(Some((msg_type, flag, raw))) => {
+                // Trame de contrôle (depuis la tâche lectrice : cancel-safe)
+                maybe_ctrl = rx_ctrl_frame.recv() => {
+                    if let Some((msg_type, flag, raw)) = maybe_ctrl {
                             // Déchiffrement si nécessaire (flag == 1)
                             let payload: Option<Vec<u8>> = if flag == 1 {
                                 if raw.len() < 12 { None }
@@ -348,13 +372,14 @@ impl NidanClient {
                                     }
                                 }
                             }
-                        }
-                        Ok(None) => {}
-                        Err(_) => {}
                     }
                 }
             }
         }
+
+        // Arrêt des tâches lectrices
+        video_reader.abort();
+        ctrl_reader.abort();
 
         // Fermeture propre
         conn.close(0u32.into(), b"session ended");
