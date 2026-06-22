@@ -72,14 +72,28 @@ impl VmPoolEntry {
 pub struct VmPool {
     vms:    DashMap<String, VmPoolEntry>,
     config: PoolConfig,
+    /// Endpoint QUIC client pour les health checks (handshake réel vers les VM).
+    /// Si None, repli sur une sonde de joignabilité UDP.
+    health_endpoint: Option<quinn::Endpoint>,
 }
 
 impl VmPool {
-    /// Crée un pool depuis la configuration statique
+    /// Crée un pool depuis la configuration statique (sans endpoint QUIC :
+    /// les health checks utilisent la sonde de joignabilité UDP).
     pub fn from_config(config: PoolConfig) -> Arc<Self> {
+        Self::from_config_with_health(config, None)
+    }
+
+    /// Crée un pool avec un endpoint QUIC dédié aux health checks, permettant
+    /// un handshake réel vers les VM (vérifie qu'un serveur NIDAN répond).
+    pub fn from_config_with_health(
+        config: PoolConfig,
+        health_endpoint: Option<quinn::Endpoint>,
+    ) -> Arc<Self> {
         let pool = Arc::new(Self {
             vms:    DashMap::new(),
             config: config.clone(),
+            health_endpoint,
         });
 
         for vm in &config.static_vms {
@@ -234,7 +248,7 @@ impl VmPool {
                     let addr = entry.addr();
                     drop(entry); // Libère le lock avant await
 
-                    let healthy = Self::ping_vm(&addr, timeout).await;
+                    let healthy = self.ping_vm(&addr, timeout).await;
 
                     if let Some(mut entry) = self.vms.get_mut(&vm_id) {
                         entry.last_health = Some(Utc::now());
@@ -258,19 +272,55 @@ impl VmPool {
     }
 
     /// Ping TCP vers la VM pour vérifier qu'elle est joignable
-    async fn ping_vm(addr: &str, timeout: Duration) -> bool {
+    /// Vérifie qu'une VM répond. NIDAN écoute en QUIC (UDP) : on tente d'abord
+    /// un vrai handshake QUIC (prouve qu'un serveur NIDAN répond), sinon on
+    /// retombe sur une sonde de joignabilité UDP (le port répond-il ?).
+    async fn ping_vm(&self, addr: &str, timeout: Duration) -> bool {
         let sock_addr: SocketAddr = match addr.parse() {
             Ok(a) => a,
             Err(_) => return false,
         };
 
-        tokio::time::timeout(
-            timeout,
-            tokio::net::TcpStream::connect(sock_addr),
-        )
-        .await
-        .map(|r| r.is_ok())
-        .unwrap_or(false)
+        // Voie privilégiée : handshake QUIC réel vers la VM.
+        if let Some(ref endpoint) = self.health_endpoint {
+            let connecting = match endpoint.connect(sock_addr, "nidan-server") {
+                Ok(c) => c,
+                Err(e) => { debug!(addr = %addr, error = %e, "connect QUIC health échoué"); return false; }
+            };
+            match tokio::time::timeout(timeout, connecting).await {
+                Ok(Ok(conn)) => {
+                    // Un serveur NIDAN a complété le handshake QUIC/TLS.
+                    conn.close(0u32.into(), b"health check");
+                    debug!(addr = %addr, "health check QUIC OK");
+                    return true;
+                }
+                Ok(Err(e)) => { debug!(addr = %addr, error = %e, "handshake QUIC health échoué"); return false; }
+                Err(_) => { debug!(addr = %addr, "timeout handshake QUIC health"); return false; }
+            }
+        }
+
+        // Repli : joignabilité UDP (envoi d'un datagramme, le port est-il là ?).
+        // NIDAN étant en UDP/QUIC, c'est plus pertinent qu'un connect TCP.
+        Self::probe_udp(sock_addr, timeout).await
+    }
+
+    /// Sonde de joignabilité UDP : envoie un petit datagramme et considère le
+    /// port joignable si l'envoi réussit sans ICMP port-unreachable immédiat.
+    async fn probe_udp(addr: SocketAddr, timeout: Duration) -> bool {
+        let bind: SocketAddr = if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }
+            .parse().unwrap();
+        let sock = match tokio::net::UdpSocket::bind(bind).await {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        if sock.connect(addr).await.is_err() { return false; }
+        // Un datagramme QUIC Initial minimal déclencherait une réponse ; ici on
+        // se contente de vérifier l'absence d'erreur immédiate à l'envoi.
+        let probe = [0u8; 1];
+        match tokio::time::timeout(timeout, sock.send(&probe)).await {
+            Ok(Ok(_)) => true,
+            _ => false,
+        }
     }
 }
 

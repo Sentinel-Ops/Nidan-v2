@@ -29,7 +29,16 @@ pub struct BrokerState {
 
 impl BrokerState {
     pub async fn new(config: BrokerConfig) -> Result<Arc<Self>> {
-        let pool     = VmPool::from_config(config.pool.clone());
+        let pool = match build_health_endpoint(&config) {
+            Ok(ep) => {
+                tracing::info!("health check : handshake QUIC réel activé");
+                VmPool::from_config_with_health(config.pool.clone(), Some(ep))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "endpoint health QUIC indisponible — repli sonde UDP");
+                VmPool::from_config(config.pool.clone())
+            }
+        };
         let sessions = SessionRegistry::new();
         let auth     = Arc::new(AuthEngine::new(config.auth.clone()));
 
@@ -282,6 +291,43 @@ async fn send_session_response(
 }
 
 /// Configuration TLS du broker
+/// Construit un endpoint QUIC client pour les health checks : il se connecte
+/// aux VM en mTLS (cert broker) et vérifie leur certificat via la CA. Un
+/// handshake réussi prouve qu'un serveur NIDAN légitime répond.
+fn build_health_endpoint(config: &BrokerConfig) -> Result<quinn::Endpoint> {
+    use std::fs;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls_pemfile::{certs as parse_certs, pkcs8_private_keys};
+
+    let cert_pem = fs::read(&config.tls.cert)?;
+    let broker_certs: Vec<CertificateDer> = parse_certs(&mut cert_pem.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let key_pem = fs::read(&config.tls.key)?;
+    let mut keys = pkcs8_private_keys(&mut key_pem.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    if keys.is_empty() { anyhow::bail!("aucune clé PKCS8 (health)"); }
+
+    let ca_pem = fs::read(&config.tls.ca_cert)?;
+    let ca_certs: Vec<CertificateDer> = parse_certs(&mut ca_pem.as_slice())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut root_store = rustls::RootCertStore::empty();
+    for ca in ca_certs { root_store.add(ca)?; }
+
+    let rustls_cfg = rustls::ClientConfig::builder()
+        .with_root_certificates(Arc::new(root_store))
+        .with_client_auth_cert(broker_certs, PrivateKeyDer::Pkcs8(keys.remove(0)))?;
+
+    let quic_client = quinn::crypto::rustls::QuicClientConfig::try_from(rustls_cfg)
+        .context("QuicClientConfig health")?;
+    let client_cfg = quinn::ClientConfig::new(Arc::new(quic_client));
+
+    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)
+        .context("bind endpoint health")?;
+    endpoint.set_default_client_config(client_cfg);
+    Ok(endpoint)
+}
+
 fn build_server_tls(config: &BrokerConfig) -> Result<quinn::crypto::rustls::QuicServerConfig> {
     use std::fs;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
