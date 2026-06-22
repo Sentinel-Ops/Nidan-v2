@@ -198,7 +198,7 @@ impl QuicServer {
         info!(session_id = %session_id, client = %remote, "session démarrée");
 
         // 2. Envoi de l'ACK
-        let caps = crate::capture::create_capturer(display, config.capture.use_xshm, config.capture.use_xdamage)
+        let caps = crate::capture::create_capturer(&config.capture.backend, display, config.capture.use_xshm, config.capture.use_xdamage, config.capture.portal_restore_token.clone())
             .map(|c| c.capabilities().clone())
             .ok();
 
@@ -386,7 +386,7 @@ impl QuicServer {
             .unwrap_or(CodecChoice::H264);
 
         // Capacités du capturer
-        let capturer = create_capturer(display, config.capture.use_xshm, config.capture.use_xdamage)
+        let capturer = create_capturer(&config.capture.backend, display, config.capture.use_xshm, config.capture.use_xdamage, config.capture.portal_restore_token.clone())
             .context("création capturer")?;
 
         let caps = capturer.capabilities().clone();

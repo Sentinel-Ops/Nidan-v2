@@ -46,6 +46,10 @@ fn default_max_conns() -> usize { 1 }
 /// Configuration de la capture d'écran
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureConfig {
+    /// Méthode de capture : "x11" (XGetImage, session Xorg) ou
+    /// "wayland"/"pipewire" (portail ScreenCast, bureau Wayland natif).
+    #[serde(default = "default_backend")]
+    pub backend: String,
     /// Numéro du display X11 à capturer (ex: 100 pour :100)
     #[serde(default = "default_display")]
     pub display_number: u32,
@@ -58,8 +62,12 @@ pub struct CaptureConfig {
     /// Nombre de frames maximum en attente dans le pipeline
     #[serde(default = "default_capture_queue")]
     pub capture_queue_depth: usize,
+    /// Jeton de restauration du portail Wayland (ré-autorisation silencieuse)
+    #[serde(default)]
+    pub portal_restore_token: Option<String>,
 }
 
+fn default_backend() -> String { "x11".to_string() }
 fn default_display() -> u32 { 100 }
 fn default_true() -> bool { true }
 fn default_capture_queue() -> usize { 4 }
@@ -130,10 +138,12 @@ impl Default for ServerConfig {
                 max_connections: default_max_conns(),
             },
             capture: CaptureConfig {
+                backend:           default_backend(),
                 display_number:    default_display(),
                 use_xshm:          true,
                 use_xdamage:       true,
                 capture_queue_depth: default_capture_queue(),
+                portal_restore_token: None,
             },
             video: VideoConfig::default(),
             tls: TlsConfig {

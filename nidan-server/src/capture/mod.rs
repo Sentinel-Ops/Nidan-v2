@@ -18,6 +18,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 pub mod x11;
+#[cfg(feature = "pipewire-capture")]
+pub mod pipewire;
 
 /// Une frame brute capturée — pixels non compressés
 #[derive(Debug)]
@@ -105,21 +107,39 @@ pub trait Capturer: Send + Sync {
 
 /// Crée le capturer approprié pour la plateforme courante
 pub fn create_capturer(
+    backend: &str,
     display_number: u32,
     use_xshm: bool,
     use_xdamage: bool,
+    portal_restore_token: Option<String>,
 ) -> Result<Arc<dyn Capturer>> {
-    #[cfg(target_os = "linux")]
-    {
-        info!(display_num = display_number, xshm = use_xshm, xdamage = use_xdamage, "initialisation capturer X11");
-        let capturer = x11::X11Capturer::new(display_number, use_xshm, use_xdamage)?;
-        return Ok(Arc::new(capturer));
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        warn!("plateforme non supportée — utilisation du capturer stub");
-        Ok(Arc::new(StubCapturer::new()))
+    match backend {
+        // Capture Wayland via portail ScreenCast + PipeWire
+        #[cfg(feature = "pipewire-capture")]
+        "wayland" | "pipewire" => {
+            info!("initialisation capturer Wayland (portail ScreenCast + PipeWire)");
+            let capturer = pipewire::PipeWireCapturer::new(portal_restore_token)?;
+            Ok(Arc::new(capturer))
+        }
+        #[cfg(not(feature = "pipewire-capture"))]
+        "wayland" | "pipewire" => {
+            anyhow::bail!("capture Wayland demandée mais la feature pipewire-capture n'est pas compilée");
+        }
+        // Capture X11 (XGetImage, session Xorg) — défaut
+        _ => {
+            #[cfg(target_os = "linux")]
+            {
+                let _ = portal_restore_token;
+                info!(display_num = display_number, xshm = use_xshm, xdamage = use_xdamage, "initialisation capturer X11");
+                let capturer = x11::X11Capturer::new(display_number, use_xshm, use_xdamage)?;
+                Ok(Arc::new(capturer))
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                warn!("plateforme non supportée — utilisation du capturer stub");
+                Ok(Arc::new(StubCapturer::new()))
+            }
+        }
     }
 }
 

@@ -37,11 +37,19 @@ clap         = { workspace = true }
 x11rb = { version = "0.13", optional = true, features = ["shm", "randr", "damage", "xtest"] }
 openh264 = { version = "0.6", optional = true }
 
+# Capture Wayland via portail ScreenCast + PipeWire (feature pipewire-capture)
+pipewire = { version = "0.8", optional = true }
+ashpd = { version = "0.9", optional = true, default-features = false, features = ["async-std"] }
+libspa = { version = "0.8", optional = true }
+pollster = { version = "0.3", optional = true }
+
 [features]
 default     = ["stub"]
 stub        = []
 full        = ["x11-capture", "openh264"]
+full-wayland = ["pipewire-capture", "openh264"]
 x11-capture = ["dep:x11rb"]
+pipewire-capture = ["dep:pipewire", "dep:ashpd", "dep:libspa", "dep:pollster"]
 ffmpeg      = []
 openh264    = ["dep:openh264"]
 
