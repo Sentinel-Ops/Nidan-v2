@@ -38,11 +38,14 @@ sdl2 = { version = "0.36", optional = true }
 
 x11rb = { version = "0.13", optional = true }
 
+wl-clipboard-rs = { version = "0.9", optional = true }
+
 [features]
 default        = ["stub"]
 stub           = []
-full           = ["sdl2-renderer", "openh264", "x11-clipboard"]
+full           = ["sdl2-renderer", "openh264", "x11-clipboard", "wayland-clipboard"]
 sdl2-renderer  = ["dep:sdl2"]
 ffmpeg         = []
 openh264       = ["dep:openh264"]
 x11-clipboard  = ["dep:x11rb"]
+wayland-clipboard = ["dep:wl-clipboard-rs"]

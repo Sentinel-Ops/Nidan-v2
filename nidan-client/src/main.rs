@@ -28,6 +28,8 @@ mod session;
 mod stream;
 #[cfg(feature = "x11-clipboard")]
 mod clipboard_x11;
+#[cfg(any(feature = "x11-clipboard", feature = "wayland-clipboard"))]
+mod clipboard_local;
 
 use config::ClientConfig;
 
