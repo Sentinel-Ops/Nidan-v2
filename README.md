@@ -2,7 +2,7 @@
 
 > Solution de bureau distant graphique sécurisé, écrite en Rust.
 > Transport QUIC, chiffrement applicatif de bout en bout (ChaCha20-Poly1305),
-> authentification mutuelle mTLS et courtier d'accès. Inspiré de
+> authentification mutuelle mTLS et broker d'accès. Inspiré de
 > [Sanzu (CEA-SEC)](https://github.com/cea-sec/sanzu), avec une couche de
 > chiffrement E2E au-dessus du transport.
 
