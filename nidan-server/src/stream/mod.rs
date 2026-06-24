@@ -46,7 +46,66 @@ pub struct QuicServer {
     endpoint: quinn::Endpoint,
 }
 
+/// Injecteur d'entrées abstrait : XTEST (X11) ou RemoteDesktop (portail Wayland),
+/// choisi à l'exécution selon le backend de capture configuré.
+enum Injector {
+    Xtest(crate::input::InputInjector),
+    #[cfg(feature = "remotedesktop-input")]
+    RemoteDesktop(crate::remote_desktop::RemoteDesktopInjector),
+}
+
+impl Injector {
+    fn inject_batch(&mut self, batch: &nidan_proto::InputBatch) -> anyhow::Result<()> {
+        match self {
+            Injector::Xtest(i) => i.inject_batch(batch),
+            #[cfg(feature = "remotedesktop-input")]
+            Injector::RemoteDesktop(i) => i.inject_batch(batch),
+        }
+    }
+    fn set_clipboard(&mut self, content: &[u8]) -> anyhow::Result<()> {
+        match self {
+            Injector::Xtest(i) => i.set_clipboard(content),
+            // Le presse-papier RemoteDesktop n'est pas géré par ce backend ;
+            // le collage dans la VM passe par le canal presse-papier dédié.
+            #[cfg(feature = "remotedesktop-input")]
+            Injector::RemoteDesktop(_) => Ok(()),
+        }
+    }
+    fn injected_count(&self) -> u64 {
+        match self {
+            Injector::Xtest(i) => i.injected_count(),
+            #[cfg(feature = "remotedesktop-input")]
+            Injector::RemoteDesktop(i) => i.injected_count(),
+        }
+    }
+}
+
 impl QuicServer {
+    /// Construit l'injecteur adapté au backend de capture.
+    /// - "wayland"/"pipewire" → RemoteDesktop (portail) si la feature est active
+    /// - sinon (ou repli) → XTEST (X11/Xorg)
+    fn make_injector(
+        backend: &str,
+        display: u32,
+        width: u32,
+        height: u32,
+        _restore_token: Option<String>,
+    ) -> anyhow::Result<Injector> {
+        match backend {
+            #[cfg(feature = "remotedesktop-input")]
+            "wayland" | "pipewire" => {
+                tracing::info!("injection via portail RemoteDesktop (Wayland)");
+                let inj = crate::remote_desktop::RemoteDesktopInjector::new(
+                    width, height, _restore_token,
+                )?;
+                Ok(Injector::RemoteDesktop(inj))
+            }
+            _ => {
+                let inj = crate::input::InputInjector::new(display, width, height)?;
+                Ok(Injector::Xtest(inj))
+            }
+        }
+    }
     /// Crée et initialise le serveur QUIC
     pub async fn new(config: ServerConfig, display: u32) -> Result<Self> {
         let bind_addr: SocketAddr = config.network.bind_addr
@@ -417,6 +476,8 @@ impl QuicServer {
         let inj_display = display;
         let inj_w = caps.width;
         let inj_h = caps.height;
+        let inj_backend = config.capture.backend.clone();
+        let inj_restore = config.capture.portal_restore_token.clone();
         let input_cipher = control_cipher;
         // Chiffreur dédié au sens retour (serveur → client) : même clé de
         // contrôle, compteur isolé, séparation des nonces via le marqueur de
@@ -449,7 +510,10 @@ impl QuicServer {
                     test_clip.as_bytes(), clip_cipher.as_mut(),
                 ).await;
             }
-            let mut injector = match crate::input::InputInjector::new(inj_display, inj_w, inj_h) {
+            // Choix de l'injecteur selon le backend de capture :
+            // - "wayland"/"pipewire" → RemoteDesktop (portail, compatible Wayland)
+            // - sinon → XTEST (X11/Xorg)
+            let mut injector = match Self::make_injector(&inj_backend, inj_display, inj_w, inj_h, inj_restore.clone()) {
                 Ok(i) => i,
                 Err(e) => { tracing::warn!(error = %e, "injecteur indisponible"); return; }
             };
@@ -489,7 +553,12 @@ impl QuicServer {
                 match msg_type {
                     nidan_proto::CTRL_MSG_INPUT => {
                         match serde_json::from_slice::<nidan_proto::InputBatch>(&payload) {
-                            Ok(batch) => { let _ = injector.inject_batch(&batch); }
+                            Ok(batch) => {
+                                tracing::debug!(events = batch.events.len(), "CTRL_MSG_INPUT reçu → injection");
+                                if let Err(e) = injector.inject_batch(&batch) {
+                                    tracing::warn!(error = %e, "inject_batch a échoué");
+                                }
+                            }
                             Err(e) => tracing::debug!(error = %e, "décodage InputBatch"),
                         }
                     }

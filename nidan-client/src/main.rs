@@ -71,6 +71,15 @@ async fn main() -> anyhow::Result<()> {
 
     nidan_common::logging::init("nidan-client");
 
+    // Arrêt immédiat sur Ctrl+C (SIGINT) : termine le processus sans attendre
+    // la boucle de rendu SDL2 ni les tâches réseau.
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("Ctrl+C reçu — arrêt du client");
+            std::process::exit(0);
+        }
+    });
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .ok();

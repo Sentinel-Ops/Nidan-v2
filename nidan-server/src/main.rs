@@ -10,6 +10,8 @@ use tracing::{error, info};
 
 mod capture;
 mod input;
+#[cfg(feature="remotedesktop-input")]
+mod remote_desktop;
 mod config;
 mod encoder;
 mod session;
@@ -23,6 +25,15 @@ use config::ServerConfig;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     nidan_common::logging::init("nidan-server");
+
+    // Arrêt immédiat sur Ctrl+C (SIGINT) : termine le processus sans attendre
+    // les threads bloquants (RemoteDesktop, boucles QUIC, etc.).
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("Ctrl+C reçu — arrêt du serveur");
+            std::process::exit(0);
+        }
+    });
 
     // Provider crypto rustls (requis avant tout usage TLS)
     rustls::crypto::ring::default_provider()
