@@ -468,3 +468,17 @@ mod tests {
         assert!(AuthMethod::try_from(99).is_err());
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROTOCOLE V2 — canal vsock agent ↔ proxy-encoder
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Contrairement au v1 (types Rust manuels + serde/JSON), le v2 est généré
+// automatiquement depuis proto/agent.proto par prost-build. Voir build.rs.
+//
+// Le module `agent` expose : AgentHello, ProxyHelloAck, StartCapture,
+// StopCapture, RawFrame, AgentStopped, AgentMessage, PixelFormat,
+// AgentStopReason. Enveloppe multiplexante : AgentMessage (oneof msg).
+pub mod agent {
+    include!(concat!(env!("OUT_DIR"), "/nidan.v2.agent.rs"));
+}

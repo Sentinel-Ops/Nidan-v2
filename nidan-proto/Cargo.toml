@@ -13,3 +13,7 @@ serde_json  = { workspace = true }
 anyhow      = { workspace = true }
 thiserror   = { workspace = true }
 bytes       = { workspace = true }
+prost       = "0.13"
+
+[build-dependencies]
+prost-build = "0.13"

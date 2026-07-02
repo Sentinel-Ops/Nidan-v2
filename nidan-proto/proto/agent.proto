@@ -1,0 +1,201 @@
+// agent.proto — Protocole NIDAN v2, canal vsock agent ↔ proxy-encoder
+//
+// Ce fichier définit les messages échangés entre :
+//   • nidan-agent           (dans la VM invitée)
+//   • nidan-proxy-encoder   (sur l'hôte Proxmox)
+//
+// Ils communiquent par un canal vsock (AF_VSOCK, virtio) point-à-point
+// hôte↔invité. L'agent envoie des pixels bruts, jamais du H.264 : c'est
+// le proxy sur l'hôte de confiance qui encode. Ce choix est le cœur du
+// modèle de menace de la v2 (inspiré de Sanzu, SSTIC 2022) : une VM
+// compromise ne peut pas fabriquer un flux vidéo piégé, parce qu'elle
+// n'a jamais accès à l'encodeur.
+//
+// Note d'implémentation : comme le nidan.proto v1, ce fichier documente
+// le contrat. Les structures Rust correspondantes sont définies dans
+// nidan-proto/src/lib.rs avec serde (sérialisation JSON), et c'est ce
+// qui est utilisé au runtime. Le .proto sert de source de vérité
+// documentaire.
+
+syntax = "proto3";
+package nidan.v2.agent;
+
+// Réutilisation depuis le proto v1 :
+//   • InputBatch — batch d'événements clavier/souris
+// Rien n'a besoin d'être redéfini côté entrées : le proxy-encoder relaie
+// les InputBatch reçus (chiffrés E2E) du client vers l'agent tels quels.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Format des pixels transportés sur vsock.
+//
+// RGBA8 et BGRA8 sont pris en charge parce que PipeWire (portail
+// ScreenCast) peut fournir l'un ou l'autre selon le compositeur : le
+// proxy-encoder s'adapte au format annoncé par l'agent, plutôt que
+// d'imposer une conversion couleur côté VM (qui augmenterait la
+// surface d'attaque de l'agent).
+//
+// YUV420 est réservé pour le futur : agent VM plus lourd, gain en bande
+// passante vsock. Pas prioritaire à l'étape 1.
+enum PixelFormat {
+    PIXEL_FORMAT_UNSPECIFIED = 0;
+    PIXEL_FORMAT_RGBA8       = 1;  // 32 bpp — 4 octets par pixel, ordre R G B A
+    PIXEL_FORMAT_BGRA8       = 2;  // 32 bpp — 4 octets par pixel, ordre B G R A
+    PIXEL_FORMAT_YUV420      = 3;  // Réservé, non implémenté à l'étape 1
+}
+
+// Raisons d'arrêt/erreur remontées par l'agent au proxy.
+enum AgentStopReason {
+    AGENT_STOP_REASON_UNSPECIFIED  = 0;
+    AGENT_STOP_REASON_CLIENT_CLOSE = 1;  // Le proxy a demandé l'arrêt (StopCapture)
+    AGENT_STOP_REASON_PORTAL_ERROR = 2;  // Le portail ScreenCast a échoué / a été révoqué
+    AGENT_STOP_REASON_INTERNAL     = 3;  // Erreur interne agent
+    AGENT_STOP_REASON_SHUTDOWN     = 4;  // Agent en cours d'arrêt (Ctrl+C, systemd stop)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MESSAGES DE HANDSHAKE (agent → proxy et proxy → agent, en début de session)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Première trame envoyée par l'agent dès que la connexion vsock s'ouvre.
+// Annonce ses capacités au proxy avant tout StartCapture.
+message AgentHello {
+    string                 agent_version    = 1;   // ex. "nidan-agent 0.2.0"
+    repeated PixelFormat   supported_formats = 2;  // formats de pixels acceptés
+    uint32                 native_width     = 3;   // résolution native du bureau
+    uint32                 native_height    = 4;
+    uint32                 max_fps          = 5;   // fps maximal soutenable
+}
+
+// Réponse du proxy à AgentHello : accepte ou refuse la session.
+message ProxyHelloAck {
+    bool    accepted        = 1;
+    string  proxy_version   = 2;
+    string  error_message   = 3;  // rempli si accepted == false
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMMANDES DE CAPTURE (proxy → agent)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Ordre de démarrer la capture d'écran et le streaming vers le proxy.
+// Émis par le proxy quand un client se connecte.
+message StartCapture {
+    uint32       target_width   = 1;   // résolution voulue (peut être < native)
+    uint32       target_height  = 2;
+    uint32       target_fps     = 3;   // 0 = utiliser max_fps annoncé
+    PixelFormat  format         = 4;   // doit être dans AgentHello.supported_formats
+    string       correlation_id = 5;   // ID de session pour corrélation logs / audit
+}
+
+// Ordre d'arrêter la capture. Émis quand le client se déconnecte, ou
+// pour libérer la VM. L'agent doit fermer proprement sa session portail.
+message StopCapture {
+    string  correlation_id = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DONNÉES (agent → proxy et proxy → agent, pendant la session)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Une frame de pixels bruts envoyée par l'agent au proxy.
+//
+// Le champ `pixels` contient les octets bruts, non parsés : c'est
+// délibéré. Le proxy peut lire `pixels` avec un simple slice, sans
+// parsing structurel — ce qui minimise la surface d'attaque exposée à
+// une VM compromise. En 1080p RGBA, `pixels` fait 1920*1080*4 = 8.3 Mo.
+message RawFrame {
+    uint64       frame_seq       = 1;  // monotone, débute à 0
+    uint64       timestamp_us    = 2;  // horodatage capture (µs monotonic clock)
+    uint32       width           = 3;
+    uint32       height          = 4;
+    PixelFormat  format          = 5;
+    uint32       stride_bytes    = 6;  // octets par ligne (>= width*bpp, alignement possible)
+    bytes        pixels          = 7;  // taille = stride_bytes * height
+}
+
+// Batch d'événements clavier/souris envoyés par le proxy à l'agent.
+// Réutilise nidan.v1.InputBatch (identique à la v1).
+// Voir nidan.proto pour la définition — pas de redéclaration ici.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIGNAUX DE FIN / ERREUR (agent → proxy)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Notifie le proxy que l'agent arrête sa capture (spontané ou en
+// réponse à un StopCapture).
+message AgentStopped {
+    AgentStopReason reason         = 1;
+    string          detail         = 2;  // message lisible, ex. "portal revoked"
+    string          correlation_id = 3;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENVELOPPE (multiplexage sur le flux vsock)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Chaque trame sur le canal vsock est un AgentMessage sérialisé,
+// précédé d'un préfixe de longueur [u32 little-endian] indiquant la
+// taille en octets du message qui suit. C'est le même framing que le
+// canal de contrôle QUIC de la v1, pour cohérence.
+//
+// La discrimination des messages passe par le oneof `msg` : le
+// destinataire sait quel type traiter en inspectant quel champ est
+// rempli.
+message AgentMessage {
+    oneof msg {
+        // Handshake
+        AgentHello    hello        = 1;   // agent → proxy (première trame)
+        ProxyHelloAck hello_ack    = 2;   // proxy → agent
+
+        // Contrôle de session
+        StartCapture  start        = 10;  // proxy → agent
+        StopCapture   stop         = 11;  // proxy → agent
+
+        // Données
+        RawFrame      frame        = 20;  // agent → proxy (le gros du trafic)
+        // InputBatch inputs       = 21;  // proxy → agent — voir nidan.proto v1
+
+        // Terminaison
+        AgentStopped  stopped      = 30;  // agent → proxy
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTES DE PROTOCOLE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 1. Framing sur vsock :
+//    [u32 length LE][protobuf/JSON bytes]  — comme le canal de contrôle QUIC v1.
+//    Taille max recommandée : 16 Mo par message (marge pour RawFrame 1080p).
+//
+// 2. Ordre des messages :
+//    - agent → proxy : AgentHello (obligatoire, première trame)
+//    - proxy → agent : ProxyHelloAck
+//    - proxy → agent : StartCapture
+//    - agent → proxy : suite de RawFrame (débit soutenu ~250 Mo/s en 1080p30 RGBA)
+//    - proxy → agent : InputBatch (à la demande)
+//    - proxy → agent : StopCapture (fin de session)
+//    - agent → proxy : AgentStopped (accusé)
+//    - fermeture du flux vsock
+//
+// 3. Format de sérialisation :
+//    À l'étape 1, on retient JSON (comme le reste du code v1 avec serde),
+//    pour cohérence. Le passage à Protobuf binaire pourra être envisagé
+//    plus tard si la surcharge JSON devient un problème (probable sur les
+//    RawFrame ~8 Mo). Le champ `bytes pixels` est de toute façon transmis
+//    en base64 en JSON, ou en binaire séparément (à trancher lors de
+//    l'implémentation, étape 3 ou 4).
+//
+// 4. Backpressure :
+//    Si le proxy ne consomme pas assez vite, le flux vsock exerce naturellement
+//    du backpressure (writes bloquants). L'agent doit soit sauter des frames,
+//    soit ralentir sa capture. Politique par défaut : sauter des frames (une
+//    file bornée de taille 2 côté agent, drop-oldest).
+//
+// 5. Séparation des canaux :
+//    Une seule connexion vsock avec multiplexage par oneof. Pas de flux
+//    séparé pour les inputs vs les frames : ils partagent la connexion,
+//    l'ordre est préservé, et la sérialisation est simple.
