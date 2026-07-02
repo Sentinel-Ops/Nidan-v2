@@ -358,3 +358,15 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
   poussé, principe (vsock, proxy sur l'hôte) documenté.
 - **Prochaine action** : démarrer l'**Étape 1** — rédiger le
   `agent.proto`.
+- **Étape 1 (fait)** : `agent.proto` v2 défini, `prost-build` intégré,
+  types Rust générés utilisables (`nidan_proto::agent`).
+- **Étape 2 (fait)** : canal vsock validé sur Proxmox.
+  - VM guest CID=42, hôte CID=2, port 5000.
+  - Test 300 frames RGBA 1920×1080 à 30 fps (~2.5 Go transportés).
+  - Débit mesuré : **248.7 MB/s** (théorique : 248.8), 0 perte, 0 hors ordre.
+  - Le canal vsock encaisse le débit cible sans accumulation de retard.
+  - Note : la latence affichée (~32 ms) par le prototype est un artefact
+    de mesure (décalage d'horloge VM↔hôte non compensé), pas la vraie
+    latence de transit. Une vraie mesure par round-trip sera faite à
+    l'étape 5 (intégration bout-en-bout).
+- **Prochaine action** : démarrer l'**Étape 3** — créer `nidan-proxy-encoder`.
