@@ -1,5 +1,5 @@
-# NIDAN v2 — Bureau distant sécurisé avec isolation par hyperviseur
-
+# NIDAN (v2) — Network Isolated Desktop Access Node -- Sécurisé avec isolation par hyperviseur
+ 
 > Successeur de [Sentinel-Ops/Nidan](https://github.com/Sentinel-Ops/Nidan).
 > v2 = refonte pour le modèle de menace **navigateur en quarantaine** :
 > l'utilisateur navigue sur Internet depuis une VM potentiellement compromise,
