@@ -1,143 +1,187 @@
-# NIDAN — Network Isolated Desktop Access Node
+# NIDAN v2 — Bureau distant sécurisé avec isolation par hyperviseur
 
-> Solution de bureau distant graphique sécurisé, écrite en Rust.
-> Transport QUIC, chiffrement applicatif de bout en bout (ChaCha20-Poly1305),
-> authentification mutuelle mTLS et broker d'accès. Inspiré de
-> [Sanzu (CEA-SEC)](https://github.com/cea-sec/sanzu), avec une couche de
-> chiffrement E2E au-dessus du transport.
+> Successeur de [Sentinel-Ops/Nidan](https://github.com/Sentinel-Ops/Nidan).
+> v2 = refonte pour le modèle de menace **navigateur en quarantaine** :
+> l'utilisateur navigue sur Internet depuis une VM potentiellement compromise,
+> sans que le poste client puisse être atteint.
 
-## Statut du projet
+## Pourquoi une v2
 
-NIDAN fonctionne **de bout en bout** : un client peut s'authentifier auprès du
-broker, se voir attribuer un serveur, et contrôler son bureau à distance avec un
-flux vidéo chiffré. La capture **et** l'injection des entrées fonctionnent sous
-**Wayland natif** (via les portails XDG), ainsi que sous X11/Xorg.
+La v1 fait fonctionner le déport de bureau (Wayland, QUIC, chiffrement E2E
+ChaCha20-Poly1305, mTLS, portails XDG pour capture et injection). Elle
+protège **le transport** entre le client et le serveur.
 
-Le projet reste un prototype de recherche : il n'a pas fait l'objet d'un audit
-de sécurité indépendant. Voir la section *Limites connues* avant tout usage en
-production.
+Elle **ne protège pas** le poste client contre une VM compromise : le serveur
+tourne dans la VM et y produit lui-même le flux H.264. Si un attaquant prend
+le contrôle de la VM (par le navigateur, un site piégé, etc.), il peut forger
+un flux vidéo malveillant qui exploite le décodeur H.264 du client — le poste
+utilisateur devient à son tour compromis.
+
+La v2 corrige ça en s'inspirant du modèle **Sanzu** (CEA-SEC, SSTIC 2022,
+*Mise en quarantaine du navigateur*), avec un ajout de sécurité : **le
+chiffrement de bout en bout** entre le client et le proxy est conservé.
+
+## Principe : sortir l'encodeur de la VM, isoler la VM par vsock
+
+L'idée centrale est que **la VM ne produit plus de H.264**. Elle envoie
+uniquement des **pixels bruts** (RGBA, non parsés) au reste du système, via
+un canal **vsock** — un bus virtio point-à-point entre l'hyperviseur et la
+VM, sans IP ni routage.
+
+L'encodeur H.264 (et le service exposé au client) sont déplacés sur l'**hôte**,
+dans une zone de confiance. Une VM compromise ne peut donc pas fabriquer un
+flux vidéo piégé, parce qu'elle n'a jamais accès à l'encodeur : elle ne
+produit que des pixels, l'hôte les compresse.
+
+### Le rôle de vsock
+
+`vsock` (`AF_VSOCK` / virtio) est fourni par l'hyperviseur (KVM/QEMU, donc
+Proxmox nativement). C'est un canal de communication **hôte ↔ invité** qui
+ne passe pas par la pile réseau : pas d'IP, pas de routage, pas de carte
+réseau côté VM. L'adressage est un simple couple `(CID, port)` où le CID
+identifie la machine (`2` = hôte, chaque VM a un CID unique).
+
+Conséquence pratique : la VM peut être configurée **sans aucune interface
+réseau vers le poste client**. Elle ne joint le monde extérieur que par
+deux canaux distincts et cloisonnés :
+
+1. **Une interface IP** dédiée à Internet, cantonnée par le pare-feu
+   Proxmox (VM → proxy web → Internet ; jamais vers le LAN).
+2. **Un canal vsock** vers l'hôte, qui transporte uniquement des pixels
+   bruts et des évènements clavier/souris.
+
+Un attaquant qui compromet totalement la VM (navigateur + OS + agent) est
+face à ces deux canaux — et rien d'autre. Il ne peut pas scanner ton LAN, ne
+peut pas atteindre le client par le réseau, et sur vsock il ne peut envoyer
+que des pixels bruts (surface d'attaque réduite à un `bytes` non parsé).
+
+### Ce qui protège le décodeur du client
+
+Le décodeur H.264 du client n'est plus exposé à une entité hostile :
+- côté client, le flux H.264 vient du **proxy-encoder** sur l'hôte de
+  confiance, jamais directement de la VM ;
+- une VM compromise ne peut pas forger de flux piégé, parce qu'elle n'a
+  pas d'encodeur H.264 sous la main.
+
+C'est la même propriété que revendique Sanzu (SSTIC 2022, page 6-7) :
+« le décodeur vidéo du client est sorti de la surface d'attaque ».
 
 ## Architecture
 
 ```
-┌──────────────┐   (1) auth mTLS + jeton  ┌──────────────┐
-│ nidan-client │ ───────────────────────► │ nidan-broker │
-│ (poste user) │ ◄── (2) adresse serveur ─│ (auth +      │
-│              │                          │  attribution)│
-└──────┬───────┘                          └──────────────┘
-       │
-       │  (3) session vidéo + entrées + presse-papier
-       │      chiffrée E2E (X25519 + ChaCha20-Poly1305) — directe
-       ▼
-┌──────────────┐
-│ nidan-server │  capture écran + injection entrées
-│ (Wayland/X11)│  (portails ScreenCast + RemoteDesktop, ou X11/XTEST)
-└──────────────┘
+                                              HÔTE (Proxmox, zone de confiance)
+                                             ┌──────────────────────────────────────────┐
+┌──────────────┐                              │                                          │
+│    CLIENT    │  ①  QUIC + mTLS + E2E        │  ┌───────────────────────┐               │
+│              │ ────────────────────────────►│  │  nidan-proxy-encoder  │               │
+│ nidan-client │                              │  │  ─────────────────    │               │
+│              │  H.264 chiffré               │  │  reçoit pixels bruts  │               │
+│ décodeur     │◄─────────────────────────────│  │  encode H.264         │               │
+│ H.264 + SDL  │                              │  │  chiffre E2E ChaCha20 │               │
+└──────────────┘                              │  │  expose QUIC au client│               │
+   protégé :                                  │  └───────────┬───────────┘               │
+   n'est jamais                               │              │ vsock                     │
+   en contact                                 │              │ (CID/port)                │
+   direct avec la VM                          │              │                           │
+                                              │  ┌───────────▼───────────────────────┐   │
+                                              │  │ VM Ubuntu (zone hostile potentielle)  │
+                                              │  │  ─────────────────────────────    │   │
+                                              │  │  nidan-agent (allégé)             │   │
+                                              │  │   • capture Wayland (PipeWire)    │   │
+                                              │  │   • envoie pixels bruts (RGBA)    │   │
+                                              │  │   • injection entrées (RemoteDesktop)│
+                                              │  │                                   │   │
+                                              │  │  navigateur web ──► Internet      │   │
+                                              │  │  (via proxy web, jamais LAN)      │   │
+                                              │  └───────────────────────────────────┘   │
+                                              └──────────────────────────────────────────┘
 ```
-
-Dans l'implémentation actuelle, le broker authentifie le client, lui attribue un
-serveur depuis un pool statique et délivre un jeton de session ; le flux vidéo
-transite **directement** entre le client et le serveur (le broker n'est pas sur
-le chemin du flux et n'en voit pas le contenu).
 
 ## Composants
 
-| Crate | Rôle |
-|---|---|
-| `nidan-proto` | Définitions du protocole et types de messages |
-| `nidan-common` | Crypto (X25519/HKDF/ChaCha20-Poly1305), config, filtrage presse-papier |
-| `nidan-server` | Capture écran + encodage H.264 + injection des entrées |
-| `nidan-client` | Décodage H.264 + rendu SDL2 + capture des entrées + presse-papier |
-| `nidan-broker` | Authentification mTLS, attribution de VM, jetons de session |
-| `nidan-audit` | Démon d'enregistrement + watermark (composant séparé, non intégré au flux) |
+| Composant | Où il tourne | Rôle |
+|---|---|---|
+| `nidan-client` | poste utilisateur | Décode le H.264, affiche (SDL2), capture clavier/souris |
+| `nidan-proxy-encoder` | **hôte Proxmox** (nouveau) | Reçoit les pixels bruts par vsock, encode en H.264, chiffre E2E, expose le service QUIC/mTLS |
+| `nidan-agent` | **VM Ubuntu** (allégé) | Capture Wayland, envoie des pixels bruts sur vsock, injecte les entrées |
+| `nidan-broker` | hôte (inchangé) | Authentification mTLS, attribution de VM, jetons de session |
+| `nidan-proto` | commun | Format des messages (Protobuf) |
+| `nidan-common` | commun | Crypto (X25519, HKDF-SHA256, ChaCha20-Poly1305), config |
 
-## Fonctionnalités
+## Modèle de menace couvert
 
-**Implémentées et fonctionnelles :**
+**Menace principale** : un attaquant compromet la VM via le navigateur (site
+piégé, exploit de moteur JS, faille de police, etc.) et cherche à atteindre
+le poste client.
 
-- Transport **QUIC** (quinn) avec **mTLS** (authentification mutuelle par certificats).
-- **Chiffrement de bout en bout** au niveau applicatif : échange de clés ECDH
-  **X25519**, dérivation **HKDF-SHA256**, chiffrement **ChaCha20-Poly1305** —
-  appliqué à la vidéo, aux entrées et au presse-papier.
-- **Capture d'écran Wayland** via le portail `ScreenCast` (PipeWire), avec
-  autorisation utilisateur. Backend **X11** également disponible.
-- **Injection des entrées** clavier/souris :
-  - sous **Wayland** : via le portail `RemoteDesktop` (mapping scancode→evdev) ;
-  - sous **X11/Xorg** : via XTEST ;
-  - le backend est choisi automatiquement selon `capture.backend`.
-- **Encodage vidéo H.264** (openh264).
-- **Courtier d'accès** : pool de serveurs déclaré statiquement, attribution +
-  jeton de session signé (JWT), health check par handshake QUIC réel.
-- **Presse-papier bidirectionnel** avec **filtrage par motifs** côté serveur
-  (ex. blocage des clés privées).
-- Arrêt propre sur **Ctrl+C** (client et serveur).
+**Ce que la v2 bloque**
+- **Exploit du décodeur H.264 du client** : la VM ne produit pas de H.264 ;
+  le flux reçu par le client est toujours produit par un encodeur sain.
+- **Accès réseau de la VM au client** : pas de route IP entre les deux ;
+  la VM ne parle qu'à l'hôte, par vsock.
+- **Exfiltration vers le LAN** : la VM n'a d'accès IP qu'à Internet via
+  le proxy web (règle pare-feu Proxmox).
+- **Persistance d'une compromission** : la VM est **jetable** (snapshot
+  Proxmox restauré entre les sessions).
 
-**Partielles ou en chantier :**
+**Ce que la v2 ne prétend pas résoudre**
+- Une faille du proxy-encoder ou de son parseur Protobuf sur l'hôte
+  (surface d'attaque réduite à un `bytes` non parsé + `InputBatch`, mais
+  non nulle).
+- Une faille dans le canal vsock lui-même (implémentation noyau/QEMU).
+- Le contenu affiché à l'utilisateur : un site piégé peut toujours tromper
+  visuellement (phishing) — c'est un problème hors périmètre.
+- L'exfiltration de données au copier-coller si le presse-papier est
+  bidirectionnel (recommandation : unidirectionnel Internet → bureau).
 
-- `nidan-audit` (enregistrement de session + watermark stéganographique) existe
-  comme démon autonome mais **n'est pas branché** sur le chemin du flux.
-- Authentification **OIDC** : présente à l'état de **stub** (ne valide pas encore
-  la signature des jetons). Seul **mTLS** est pleinement opérationnel.
-- Relais du flux par le broker (isolation réseau client/VM par un proxy) : **non
-  implémenté** — le client se connecte directement au serveur.
+## Améliorations par rapport à Sanzu
 
-## Build
+Ce projet reprend le cœur du modèle Sanzu (encodeur hors VM, pixels bruts,
+VM jetable) et **ajoute** :
 
-Prérequis : Rust stable, et selon les features : `libpipewire-0.3-dev`,
-`libdbus-1-dev`, `clang` (Wayland) ; `libxcb`/`x11` (X11) ; `libsdl2-dev`
-(client) ; openh264.
+- **Chiffrement E2E** (X25519 + ChaCha20-Poly1305) sur le canal
+  proxy-encoder ↔ client, là où Sanzu s'arrête à TLS. Un attaquant qui
+  compromettrait le TLS du côté client (MITM entreprise, faille TLS)
+  ne verrait toujours pas le contenu de session.
+- **Transport QUIC** (multiplexage, meilleure latence sur réseau dégradé)
+  là où Sanzu utilise TCP.
+- **Authentification mTLS + jetons JWT** par le broker, indépendante de
+  Kerberos (Sanzu suppose un domaine Windows/Kerberos).
 
-```bash
-# Serveur — cible Wayland (capture + injection portails)
-cargo build -p nidan-server --release \
-    --no-default-features --features "pipewire-capture openh264 remotedesktop-input"
+## Pré-requis
 
-# Serveur — cible X11/Xorg (capture XGetImage + injection XTEST)
-cargo build -p nidan-server --release \
-    --no-default-features --features "x11-capture openh264"
+- **Hôte** : Linux avec KVM/QEMU (Proxmox recommandé), module `vhost-vsock`
+  chargé.
+- **VM** : Ubuntu 24.04 (Wayland + portails XDG), device `virtio-vsock`
+  configuré, aucune interface réseau vers le poste client.
+- **Client** : Debian 12 ou Ubuntu 24.04.
 
-# Client
-cargo build -p nidan-client --release \
-    --no-default-features --features "sdl2-renderer openh264 x11-clipboard wayland-clipboard"
+Configuration Proxmox de la VM :
+- ajouter un device `vhost-vsock-pci` avec un CID unique ;
+- interface réseau restreinte au VLAN Internet uniquement, aucun accès LAN
+  (pare-feu Proxmox) ;
+- image en lecture seule + disque overlay éphémère (bonne pratique) ;
+- snapshot de référence pour restauration après session.
 
-# Broker
-cargo build -p nidan-broker --release
-```
+## Statut
 
-> **Important (Wayland) :** le serveur doit être lancé **dans la session
-> graphique** de l'utilisateur (pas via SSH nu), car les portails ScreenCast et
-> RemoteDesktop sont des services de session. Une unité systemd `--user` est
-> fournie à cet effet.
+**v2 en cours de conception.** Le code v1 fonctionnel reste disponible sur
+[Sentinel-Ops/Nidan](https://github.com/Sentinel-Ops/Nidan) (tag
+`v1.0-fonctionnelle`).
 
-## Déploiement
+Chantiers en cours :
+1. Format Protobuf du canal vsock (pixels bruts + entrées).
+2. Extraction de l'encodeur de `nidan-server` v1 vers `nidan-proxy-encoder`.
+3. Allègement de `nidan-server` v1 vers `nidan-agent` (retrait encodeur,
+   sortie vsock).
+4. Configuration Proxmox de référence (vsock, pare-feu, snapshot).
 
-Le déploiement multi-machines (PKI, configuration par rôle, paquets `.deb`,
-phases de test) est décrit dans `GUIDE-DEPLOIEMENT.md`.
+## Références
 
-Chaîne type :
-1. Générer la PKI (`scripts/pki-deploy.sh`) et distribuer les certificats.
-2. Lancer le serveur dans sa session graphique (backend `wayland`).
-3. Lancer le broker (même secret JWT que le serveur).
-4. Connecter le client (directement, ou via le broker).
-
-## Modèle de sécurité — résumé
-
-- Le **chiffrement E2E** protège le contenu de session contre un intermédiaire
-  réseau, et — le flux étant direct client↔serveur — le broker ne voit jamais le
-  contenu.
-- Le **broker** ne participe pas à l'échange de clés client↔serveur ; l'identité
-  du serveur est vérifiée par le client via la CA.
-- Un **serveur/VM compromis** reste un risque pour le client (décodeur H.264,
-  presse-papier) : voir `docs/ANALYSE-SECURITE-VM-vers-Client.md`.
-
-## Limites connues
-
-- Prototype non audité ; pas de certification.
-- Pool de serveurs **statique** (pas d'orchestration dynamique de VM).
-- OIDC non finalisé (stub) ; seul mTLS est opérationnel.
-- `nidan-audit` non intégré au flux.
-- Sous Wayland, deux autorisations de portail peuvent être demandées (capture +
-  contrôle).
+- Fabrice Desclaux, Frédéric Vannière, *Mise en quarantaine du navigateur*,
+  SSTIC 2022 (CEA-SEC).
+- [cea-sec/sanzu](https://github.com/cea-sec/sanzu) — l'implémentation
+  originale du modèle.
 
 ## Licence
 
