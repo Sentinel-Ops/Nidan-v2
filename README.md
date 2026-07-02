@@ -108,6 +108,38 @@ C'est la même propriété que revendique Sanzu (SSTIC 2022, page 6-7) :
 | `nidan-proto` | commun | Format des messages (Protobuf) |
 | `nidan-common` | commun | Crypto (X25519, HKDF-SHA256, ChaCha20-Poly1305), config |
 
+### Où tourne le proxy-encoder — précision
+
+`nidan-proxy-encoder` s'installe **sur l'hôte Proxmox lui-même**, comme un
+service systemd — **pas dans une VM invitée**. C'est un choix structurant du
+modèle Sanzu, pour trois raisons :
+
+1. **Accès natif à vsock.** L'API `AF_VSOCK` du noyau hôte donne un accès
+   direct au bus virtio-vsock des VMs invitées. Depuis une VM invitée, ce
+   même bus n'est pas accessible : vsock est un canal **hôte↔invité**, pas
+   invité↔invité.
+2. **L'hyperviseur est déjà la racine de confiance.** Si Proxmox est
+   compromis, l'attaquant contrôle toutes les VMs de toute façon. Placer
+   le proxy sur Proxmox ne dégrade donc pas le niveau de sécurité : il
+   est cohérent d'y placer le point de terminaison E2E côté hôte.
+3. **La barrière est au bon endroit.** La menace vient de la VM navigateur ;
+   la zone à protéger est le poste client. Le proxy sur Proxmox se trouve
+   *juste au-dessus* de la zone à risque et *en dessous* du réseau et du
+   client — exactement la bonne position.
+
+Le déploiement type :
+
+- **Hôte Proxmox** : le noyau + Proxmox VE + un service systemd
+  `nidan-proxy-encoder`, qui expose QUIC sur l'interface réseau (face
+  client) et parle vsock à la VM invitée (face agent).
+- **VM invitée Ubuntu** : `nidan-agent` en service utilisateur dans la
+  session Wayland ; device virtio-vsock (`vhost-vsock-pci`) avec un
+  `guest-cid` unique ; aucune interface réseau vers le client
+  (interface IP dédiée à Internet uniquement, cantonnée par le pare-feu
+  Proxmox).
+- **Poste client** : `nidan-client` (inchangé par rapport à la v1 sur
+  le principe).
+
 ## Modèle de menace couvert
 
 **Menace principale** : un attaquant compromet la VM via le navigateur (site
