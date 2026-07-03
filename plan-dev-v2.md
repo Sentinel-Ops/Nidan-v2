@@ -356,8 +356,6 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
 
 - **Étape 0 (fait)** : repo `Nidan-v2` créé, README de fondation
   poussé, principe (vsock, proxy sur l'hôte) documenté.
-- **Prochaine action** : démarrer l'**Étape 1** — rédiger le
-  `agent.proto`.
 - **Étape 1 (fait)** : `agent.proto` v2 défini, `prost-build` intégré,
   types Rust générés utilisables (`nidan_proto::agent`).
 - **Étape 2 (fait)** : canal vsock validé sur Proxmox.
@@ -369,7 +367,6 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     de mesure (décalage d'horloge VM↔hôte non compensé), pas la vraie
     latence de transit. Une vraie mesure par round-trip sera faite à
     l'étape 5 (intégration bout-en-bout).
-- **Prochaine action** : démarrer l'**Étape 3** — créer `nidan-proxy-encoder`.
 - **Étape 3 (fait)** : crate `nidan-proxy-encoder` créé, face client validée
   bout-en-bout.
   - Test réel : client Debian 12 → broker (Ubuntu 20.04)
@@ -381,6 +378,21 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
   - 20 frames décodées, 0 droppée (le stub s'arrête après quelques
     secondes — comportement attendu, sera remplacé par VsockCapturer
     à l'étape 5)
-- **Prochaine action** : démarrer l'**Étape 4** — créer `nidan-agent`
-  (allègement de nidan-server v1 : retrait encodeur/QUIC/JWT, ajout
-  sortie vsock).
+- **Étape 4 (fait)** : crate `nidan-agent` créé, compilation et démarrage
+  validés dans la VM cible.
+  - `main.rs` + `config.rs` + `vsock_link.rs` (nouveau code)
+  - Trait `Capturer` v1 réutilisé (StubCapturer, PipeWire feature-gated)
+  - Handshake AgentHello ↔ ProxyHelloAck, framing prost sur vsock
+  - Envoi RawFrame (pixels bruts) + réception structurée des commandes
+  - Config allégée : vsock + capture + input (pas de TLS/JWT/session)
+  - Workspace complet compile en 1m12s sans erreur
+  - Agent testé dans la VM cible : démarre, lit sa config depuis
+    /etc/nidan/nidan-agent.toml (via NIDAN_AGENT_CONFIG), initialise le
+    capturer stub (BGRA 1920x1080), tente la connexion vsock vers
+    CID=2 port=6100 → échec attendu (personne n'écoute encore, l'étape 5
+    ajoutera FrameSource::Vsock côté proxy-encoder).
+- **Prochaine action** : démarrer l'**Étape 5** — intégration bout-en-bout
+  (côté proxy-encoder : ajouter `FrameSource::Vsock` qui écoute et accepte
+  la connexion de l'agent ; côté agent : brancher l'injection RemoteDesktop
+  pour les InputBatch reçus ; test complet client → broker → proxy (hôte)
+  → vsock → agent (VM) → Wayland réel).
