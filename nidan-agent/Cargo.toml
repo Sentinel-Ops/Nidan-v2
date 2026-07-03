@@ -1,0 +1,50 @@
+[package]
+name        = "nidan-agent"
+description = "NIDAN v2 — agent dans la VM (capture Wayland + sortie vsock, sans encodage)"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+
+[[bin]]
+name = "nidan-agent"
+path = "src/main.rs"
+
+[dependencies]
+nidan-proto  = { path = "../nidan-proto" }
+nidan-common = { path = "../nidan-common" }
+tokio        = { workspace = true }
+tokio-util   = { workspace = true }
+tokio-vsock  = "0.7"
+bytes        = { workspace = true }
+prost        = "0.13"
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+anyhow       = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+config       = { workspace = true }
+toml         = { workspace = true }
+clap         = { workspace = true }
+
+# Capture réelle sous Wayland (portail PipeWire/ScreenCast)
+pipewire  = { version = "0.7",  optional = true }
+ashpd     = { version = "0.10", optional = true }
+libspa    = { version = "0.7",  optional = true }
+pollster  = { version = "0.4",  optional = true }
+
+[features]
+# Configuration minimale de l'agent :
+#   • stub                = source de frames factice (StubCapturer, pattern animé)
+#   • pipewire-capture    = capture Wayland réelle via portail ScreenCast
+#   • remotedesktop-input = injection clavier/souris via portail RemoteDesktop
+#
+# Par défaut : stub pour tester rapidement sans dépendances.
+# En prod dans une VM Wayland : "wayland" (= pipewire-capture + remotedesktop-input).
+default             = ["stub"]
+stub                = []
+wayland             = ["pipewire-capture", "remotedesktop-input"]
+pipewire-capture    = ["dep:pipewire", "dep:ashpd", "dep:libspa", "dep:pollster"]
+remotedesktop-input = ["dep:ashpd", "dep:pollster"]
