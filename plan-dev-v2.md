@@ -356,8 +356,10 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
 
 - **Étape 0 (fait)** : repo `Nidan-v2` créé, README de fondation
   poussé, principe (vsock, proxy sur l'hôte) documenté.
+
 - **Étape 1 (fait)** : `agent.proto` v2 défini, `prost-build` intégré,
   types Rust générés utilisables (`nidan_proto::agent`).
+
 - **Étape 2 (fait)** : canal vsock validé sur Proxmox.
   - VM guest CID=42, hôte CID=2, port 5000.
   - Test 300 frames RGBA 1920×1080 à 30 fps (~2.5 Go transportés).
@@ -367,6 +369,7 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     de mesure (décalage d'horloge VM↔hôte non compensé), pas la vraie
     latence de transit. Une vraie mesure par round-trip sera faite à
     l'étape 5 (intégration bout-en-bout).
+
 - **Étape 3 (fait)** : crate `nidan-proxy-encoder` créé, face client validée
   bout-en-bout.
   - Test réel : client Debian 12 → broker (Ubuntu 20.04)
@@ -378,6 +381,7 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
   - 20 frames décodées, 0 droppée (le stub s'arrête après quelques
     secondes — comportement attendu, sera remplacé par VsockCapturer
     à l'étape 5)
+
 - **Étape 4 (fait)** : crate `nidan-agent` créé, compilation et démarrage
   validés dans la VM cible.
   - `main.rs` + `config.rs` + `vsock_link.rs` (nouveau code)
@@ -391,6 +395,7 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     capturer stub (BGRA 1920x1080), tente la connexion vsock vers
     CID=2 port=6100 → échec attendu (personne n'écoute encore, l'étape 5
     ajoutera FrameSource::Vsock côté proxy-encoder).
+
 - **Étape 5A (fait)** : VsockCapturer côté proxy-encoder, backend
   configurable stub/vsock.
   - Nouveau `capture/vsock.rs` : implémente Capturer, écoute vsock,
@@ -398,6 +403,7 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     conversion vers RawFrame v1 pour l'encodeur H.264.
   - Feature `vsock-source` par défaut.
   - Compilation OK, binaire démarre proprement.
+
 - **Étape 5B (fait)** : intégration bout-en-bout validée, modèle Sanzu
   fonctionnellement démontré.
   - VsockService global instancié au boot du proxy (modèle A, aligné Sanzu)
@@ -408,6 +414,8 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     * agent → vsock → proxy → H.264 hardware → E2E ChaCha20 → QUIC → client
     * 14 frames décodées, 0 droppée
   - Preuve visuelle : dégradé RVB affiché sur écran client (voir capture dans docs/proof/etape5B-ok.png)
+  - [Release GitHub v0.5-etape5B-sanzu-fonctionnel](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.5-etape5B-sanzu-fonctionnel) — vidéo + capture
+
 - **Prochaine action** : étape 5C — passage à Wayland réel côté agent
   (recompilation avec --features wayland, backend = "pipewire"),
   puis étape 6 pour documentation Proxmox et service systemd.
