@@ -70,31 +70,50 @@ C'est la même propriété que revendique Sanzu (SSTIC 2022, page 6-7) :
 
 ```
                                               HÔTE (Proxmox, zone de confiance)
-                                             ┌──────────────────────────────────────────┐
-┌──────────────┐                              │                                          │
-│    CLIENT    │  ①  QUIC + mTLS + E2E        │  ┌───────────────────────┐               │
-│              │ ────────────────────────────►│  │  nidan-proxy-encoder  │               │
-│ nidan-client │                              │  │  ─────────────────    │               │
+                                              ┌──────────────────────────────────────────┐
+                                              │   ┌───────────────────┐                  │
+                                              │   │   nidan-broker    │                  │
+┌──────────────┐  ①  auth mTLS + JWT          │   │  ───────────────  │                  │
+│    CLIENT    │◄────────────────────────────►│   │  vérifie identité │                  │
+│              │                              │   │  génère token JWT │                  │
+│ nidan-client │                              │   │  attribue une VM  │                  │
+│              │                              │   │  du pool          │                  │
+│ décodeur     │                              │   └───────────────────┘                  │
+│ H.264 + SDL  │                              │                                          │
+│              │  ②  QUIC + mTLS + E2E        │  ┌───────────────────────┐               │
+│              │      (avec JWT du broker)    │  │  nidan-proxy-encoder  │               │
+│              │◄────────────────────────────►│  │  ─────────────────    │               │
+│              │                              │  │  vérifie JWT          │               │
 │              │  H.264 chiffré               │  │  reçoit pixels bruts  │               │
-│ décodeur     │◄─────────────────────────────│  │  encode H.264         │               │
-│ H.264 + SDL  │                              │  │  chiffre E2E ChaCha20 │               │
-└──────────────┘                              │  │  expose QUIC au client│               │
-   protégé :                                  │  └───────────┬───────────┘               │
-   n'est jamais                               │              │ vsock                     │
-   en contact                                 │              │ (CID/port)                │
-   direct avec la VM                          │              │                           │
+│              │                              │  │  encode H.264         │               │
+└──────────────┘                              │  │  chiffre E2E ChaCha20 │               │
+   protégé :                                  │  │  expose QUIC au client│               │
+   n'est jamais                               │  └───────────┬───────────┘               │
+   en contact                                 │              │ vsock                     │
+   direct avec la VM                          │              │ (CID/port)                │
+                                              │              │                           │
                                               │  ┌───────────▼───────────────────────┐   │
                                               │  │ VM Ubuntu (zone hostile potentielle)  │
                                               │  │  ─────────────────────────────    │   │
                                               │  │  nidan-agent (allégé)             │   │
                                               │  │   • capture Wayland (PipeWire)    │   │
                                               │  │   • envoie pixels bruts (RGBA)    │   │
-                                              │  │   • injection entrées (RemoteDesktop)│
+                                              │  │   • injection entrées (RemoteDesktop) │
                                               │  │                                   │   │
                                               │  │  navigateur web ──► Internet      │   │
                                               │  │  (via proxy web, jamais LAN)      │   │
                                               │  └───────────────────────────────────┘   │
                                               └──────────────────────────────────────────┘
+ 
+Flux de session :
+  ① Le client s'authentifie auprès du broker (mTLS). Le broker vérifie
+    l'identité, choisit une VM disponible dans le pool, génère un jeton
+    JWT court-terme, et renvoie au client l'adresse du proxy-encoder à
+    utiliser.
+  ② Le client se connecte au proxy-encoder avec le JWT en poche. Le
+    proxy vérifie le JWT (avec le même secret que le broker), établit
+    le canal E2E ChaCha20 avec le client, et démarre le streaming
+    depuis l'agent VM (via vsock).
 ```
 
 ## Composants
@@ -104,7 +123,7 @@ C'est la même propriété que revendique Sanzu (SSTIC 2022, page 6-7) :
 | `nidan-client` | poste utilisateur | Décode le H.264, affiche (SDL2), capture clavier/souris |
 | `nidan-proxy-encoder` | **hôte Proxmox** (nouveau) | Reçoit les pixels bruts par vsock, encode en H.264, chiffre E2E, expose le service QUIC/mTLS |
 | `nidan-agent` | **VM Ubuntu** (allégé) | Capture Wayland, envoie des pixels bruts sur vsock, injecte les entrées |
-| `nidan-broker` | hôte (inchangé) | Authentification mTLS, attribution de VM, jetons de session |
+| `nidan-broker` | **hôte Proxmox** (systemd) | Authentification mTLS des clients, attribution d'une VM du pool, génération de jetons JWT court-terme |
 | `nidan-proto` | commun | Format des messages (Protobuf) |
 | `nidan-common` | commun | Crypto (X25519, HKDF-SHA256, ChaCha20-Poly1305), config |
 
@@ -126,6 +145,13 @@ modèle Sanzu, pour trois raisons :
    la zone à protéger est le poste client. Le proxy sur Proxmox se trouve
    *juste au-dessus* de la zone à risque et *en dessous* du réseau et du
    client — exactement la bonne position.
+
+Le broker (`nidan-broker`) tourne également sur l'hôte Proxmox
+> comme service systemd, dans la même zone de confiance que le proxy-encoder.
+> Il partage avec lui un secret JWT commun pour signer/vérifier les
+> jetons de session. Ce couple broker+proxy sur l'hôte constitue le
+> plan de contrôle de la solution — la VM invitée n'a aucun accès à
+> ces services et ne connaît que son canal vsock avec l'hôte.
 
 Le déploiement type :
 
