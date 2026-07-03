@@ -407,7 +407,7 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     * proxy → vsock → agent (VM CID 42) → StubCapturer
     * agent → vsock → proxy → H.264 hardware → E2E ChaCha20 → QUIC → client
     * 14 frames décodées, 0 droppée
-  - Preuve visuelle : dégradé RVB affiché sur écran client
+  - Preuve visuelle : dégradé RVB affiché sur écran client (voir capture dans docs/proof/etape5B-ok.png)
 - **Prochaine action** : étape 5C — passage à Wayland réel côté agent
   (recompilation avec --features wayland, backend = "pipewire"),
   puis étape 6 pour documentation Proxmox et service systemd.
