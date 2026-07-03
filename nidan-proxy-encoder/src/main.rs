@@ -69,6 +69,24 @@ async fn main() -> anyhow::Result<()> {
 
     info!("configuration chargee: bind={}, display={}, codec={}", cfg.network.bind_addr, disp_num, cfg.video.codec);
 
+    // ── Étape 5B : démarrage anticipé du service vsock (modèle A) ──
+    // Si backend = "vsock", on démarre le VsockCapturer AVANT le serveur QUIC,
+    // pour qu'il écoute vsock en permanence, indépendamment des connexions client.
+    #[cfg(feature = "vsock-source")]
+    {
+        if cfg.capture.backend == "vsock" {
+            info!("démarrage anticipé du service vsock (écoute permanente)");
+            crate::capture::vsock_service::VsockService::start(
+                std::env::var("NIDAN_VSOCK_PORT")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(crate::capture::vsock::DEFAULT_VSOCK_PORT),
+                cfg.video.max_fps,
+            )
+            .context("démarrage du service vsock global")?;
+        }
+    }
+
     let server = stream::QuicServer::new(cfg, disp_num).await
         .context("initialisation serveur QUIC")?;
 

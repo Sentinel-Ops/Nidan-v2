@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 prost        = { version = "0.13", optional = true }
+once_cell    = { version = "1", optional = false }
 tokio-vsock  = { version = "0.7", optional = true }
 nidan-proto  = { path = "../nidan-proto" }
 nidan-common = { path = "../nidan-common" }

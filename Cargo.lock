@@ -2074,6 +2074,7 @@ dependencies = [
  "jsonwebtoken",
  "nidan-common",
  "nidan-proto",
+ "once_cell",
  "openh264",
  "prost 0.13.5",
  "quinn",

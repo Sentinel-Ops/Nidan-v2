@@ -21,6 +21,9 @@ pub mod x11;
 
 #[cfg(feature = "vsock-source")]
 pub mod vsock;
+
+#[cfg(feature = "vsock-source")]
+pub mod vsock_service;
 #[cfg(feature = "pipewire-capture")]
 pub mod pipewire;
 

@@ -444,11 +444,51 @@ impl QuicServer {
         let codec = CodecChoice::from_str(&config.video.codec)
             .unwrap_or(CodecChoice::H264);
 
-        // Capacités du capturer
-        let capturer = create_capturer(&config.capture.backend, display, config.capture.use_xshm, config.capture.use_xdamage, config.capture.portal_restore_token.clone())
-            .context("création capturer")?;
-
-        let caps = capturer.capabilities().clone();
+        // ─── Étape 5B : gestion différenciée du backend ───
+        // - Si backend = "vsock" : on utilise le VsockService global qui tourne
+        //   déjà depuis le boot du proxy. On récupère son récepteur de frames
+        //   et on ignore le canal (tx_raw, rx_raw) créé ci-dessus.
+        // - Sinon : comportement v1, on crée un capturer local par session.
+        let (caps, cap_handle_opt, effective_rx_raw): (
+            crate::capture::CapturerCapabilities,
+            Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+            mpsc::Receiver<RawFrame>,
+        ) = {
+            #[cfg(feature = "vsock-source")]
+            {
+                if config.capture.backend == "vsock" {
+                    let service = crate::capture::vsock_service::VsockService::get()
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "VsockService non initialisé — bug de démarrage du proxy"
+                        ))?;
+                    let caps = service.capabilities().clone();
+                    let rx = service.take_frames_receiver().await
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "récepteur vsock déjà consommé (mono-session étape 5B) : \
+                             redémarrer le proxy pour une nouvelle session"
+                        ))?;
+                    // Fermer tx_raw explicitement (inutilisé dans ce chemin).
+                    drop(tx_raw);
+                    (caps, None, rx)
+                } else {
+                    let capturer = create_capturer(&config.capture.backend, display, config.capture.use_xshm, config.capture.use_xdamage, config.capture.portal_restore_token.clone())
+                        .context("création capturer")?;
+                    let caps = capturer.capabilities().clone();
+                    let cap_shutdown = session_shutdown.clone();
+                    let handle = capturer.start(tx_raw, config.video.max_fps, cap_shutdown);
+                    (caps, Some(handle), rx_raw)
+                }
+            }
+            #[cfg(not(feature = "vsock-source"))]
+            {
+                let capturer = create_capturer(&config.capture.backend, display, config.capture.use_xshm, config.capture.use_xdamage, config.capture.portal_restore_token.clone())
+                    .context("création capturer")?;
+                let caps = capturer.capabilities().clone();
+                let cap_shutdown = session_shutdown.clone();
+                let handle = capturer.start(tx_raw, config.video.max_fps, cap_shutdown);
+                (caps, Some(handle), rx_raw)
+            }
+        };
 
         let enc_params = EncoderParams::for_remote_desktop(
             codec,
@@ -457,14 +497,10 @@ impl QuicServer {
             config.video.max_fps,
         );
 
-        // Démarrage du capturer
-        let cap_shutdown = session_shutdown.clone();
-        let cap_handle = capturer.start(tx_raw, config.video.max_fps, cap_shutdown.clone());
-
         // Démarrage de l'encodeur
         let enc_pipeline = EncoderPipeline::new(enc_params, None /* clé E2E Phase 2 */);
         let enc_shutdown = session_shutdown.clone();
-        let enc_handle = enc_pipeline.start(rx_raw, tx_enc, enc_shutdown);
+        let enc_handle = enc_pipeline.start(effective_rx_raw, tx_enc, enc_shutdown);
 
         // Stream QUIC unidirectionnel pour le flux vidéo
         let mut video_tx = conn.open_uni().await
@@ -663,7 +699,11 @@ impl QuicServer {
         }
 
         session_shutdown.cancel();
-        let _ = cap_handle.await;
+        // Le capturer local n'existe qu'en mode non-vsock ; en mode vsock,
+        // le VsockService global tourne indépendamment de la session.
+        if let Some(handle) = cap_handle_opt {
+            let _ = handle.await;
+        }
         let _ = enc_handle.await;
 
         info!(session_id = %session_id, "session terminée");
