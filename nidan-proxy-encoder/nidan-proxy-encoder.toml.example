@@ -1,0 +1,42 @@
+# Config d'exemple pour tester nidan-proxy-encoder en local (étape 3)
+# À copier vers /etc/nidan-proxy-encoder.toml ou pointer via NIDAN_PROXY_CONFIG.
+
+[network]
+bind_addr = "0.0.0.0:7610"
+session_timeout_secs = 3600
+max_connections = 8
+
+[tls]
+ca_cert = "/etc/nidan/certs/ca.crt"
+cert = "/etc/nidan/certs/server.crt"
+key = "/etc/nidan/certs/server.key"
+
+[capture]
+# À l'étape 3, on utilise le backend "stub" (pattern animé factice)
+# pour valider la face client (QUIC/mTLS/E2E) SANS dépendre de vsock.
+# À l'étape 5, ce sera "vsock" pour brancher l'agent VM.
+backend = "stub"
+display_number = 0
+use_xshm = false
+use_xdamage = false
+capture_queue_depth = 4
+
+[video]
+codec = "h264"
+max_fps = 20
+target_bitrate_kbps = 0
+pixel_format = "yuv420p"
+hardware_accel = false
+
+[security]
+seccomp_enabled = false
+e2e_encryption = true
+jwt_secret = "REMPLACER_PAR_LE_MEME_SECRET_QUE_LE_BROKER"
+require_session_token = true
+
+[clipboard]
+allow_client_to_server = true
+allow_server_to_client = true
+max_size_bytes = 65536
+blocked_patterns = ["-----BEGIN [A-Z ]*PRIVATE KEY-----"]
+audit_transfers = true

@@ -1994,6 +1994,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "nidan-proxy-encoder"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chrono",
+ "clap",
+ "config",
+ "jsonwebtoken",
+ "nidan-common",
+ "nidan-proto",
+ "openh264",
+ "quinn",
+ "rand 0.8.6",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nidan-server"
 version = "0.1.0"
 dependencies = [

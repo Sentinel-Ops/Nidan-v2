@@ -8,6 +8,7 @@ members = [
     "nidan-audit",
     "capture-test",
     "encode-test",
+    "nidan-proxy-encoder",
 ]
 resolver = "2"
 

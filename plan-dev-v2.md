@@ -370,3 +370,17 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     latence de transit. Une vraie mesure par round-trip sera faite à
     l'étape 5 (intégration bout-en-bout).
 - **Prochaine action** : démarrer l'**Étape 3** — créer `nidan-proxy-encoder`.
+- **Étape 3 (fait)** : crate `nidan-proxy-encoder` créé, face client validée
+  bout-en-bout.
+  - Test réel : client Debian 12 → broker (Ubuntu 20.04)
+    → proxy-encoder v2 (dans VM cible 192.168.8.100)
+  - Handshake mTLS + JWT + E2E ChaCha20 fonctionnels
+  - Encodage H.264 (openh264) + décodage client OK
+  - Rendu SDL2 côté client : dégradé RVB du StubCapturer visible
+    (voir preuve : docs/proofs/etape3-stub-e2e.png)
+  - 20 frames décodées, 0 droppée (le stub s'arrête après quelques
+    secondes — comportement attendu, sera remplacé par VsockCapturer
+    à l'étape 5)
+- **Prochaine action** : démarrer l'**Étape 4** — créer `nidan-agent`
+  (allègement de nidan-server v1 : retrait encodeur/QUIC/JWT, ajout
+  sortie vsock).
