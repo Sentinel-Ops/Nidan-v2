@@ -398,8 +398,16 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     conversion vers RawFrame v1 pour l'encodeur H.264.
   - Feature `vsock-source` par défaut.
   - Compilation OK, binaire démarre proprement.
-- **Prochaine action** : sous-jalon **5B** — test bout-en-bout avec
-  proxy-encoder sur l'hôte Proxmox + agent stub dans la VM + client.
-  Le client doit voir le dégradé RVB transporté par vsock pour la
-  première fois (validation du sens frames uniquement — les inputs
-  viendront à l'étape 5C avec un patch mineur du proto).
+- **Étape 5B (fait)** : intégration bout-en-bout validée, modèle Sanzu
+  fonctionnellement démontré.
+  - VsockService global instancié au boot du proxy (modèle A, aligné Sanzu)
+  - Refactor de stream/mod.rs : gestion conditionnelle backend vsock/stub
+  - Test réel bout-en-bout réussi :
+    * client Debian → broker → proxy (HÔTE Proxmox 192.168.8.175)
+    * proxy → vsock → agent (VM CID 42) → StubCapturer
+    * agent → vsock → proxy → H.264 hardware → E2E ChaCha20 → QUIC → client
+    * 14 frames décodées, 0 droppée
+  - Preuve visuelle : dégradé RVB affiché sur écran client
+- **Prochaine action** : étape 5C — passage à Wayland réel côté agent
+  (recompilation avec --features wayland, backend = "pipewire"),
+  puis étape 6 pour documentation Proxmox et service systemd.
