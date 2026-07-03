@@ -391,8 +391,15 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     capturer stub (BGRA 1920x1080), tente la connexion vsock vers
     CID=2 port=6100 → échec attendu (personne n'écoute encore, l'étape 5
     ajoutera FrameSource::Vsock côté proxy-encoder).
-- **Prochaine action** : démarrer l'**Étape 5** — intégration bout-en-bout
-  (côté proxy-encoder : ajouter `FrameSource::Vsock` qui écoute et accepte
-  la connexion de l'agent ; côté agent : brancher l'injection RemoteDesktop
-  pour les InputBatch reçus ; test complet client → broker → proxy (hôte)
-  → vsock → agent (VM) → Wayland réel).
+- **Étape 5A (fait)** : VsockCapturer côté proxy-encoder, backend
+  configurable stub/vsock.
+  - Nouveau `capture/vsock.rs` : implémente Capturer, écoute vsock,
+    handshake miroir avec l'agent, réception RawFrame protobuf,
+    conversion vers RawFrame v1 pour l'encodeur H.264.
+  - Feature `vsock-source` par défaut.
+  - Compilation OK, binaire démarre proprement.
+- **Prochaine action** : sous-jalon **5B** — test bout-en-bout avec
+  proxy-encoder sur l'hôte Proxmox + agent stub dans la VM + client.
+  Le client doit voir le dégradé RVB transporté par vsock pour la
+  première fois (validation du sens frames uniquement — les inputs
+  viendront à l'étape 5C avec un patch mineur du proto).
