@@ -18,6 +18,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 pub mod x11;
+
+#[cfg(feature = "vsock-source")]
+pub mod vsock;
 #[cfg(feature = "pipewire-capture")]
 pub mod pipewire;
 
@@ -114,6 +117,21 @@ pub fn create_capturer(
     portal_restore_token: Option<String>,
 ) -> Result<Arc<dyn Capturer>> {
     match backend {
+        // Réception de frames depuis un agent NIDAN v2 par vsock (modèle Sanzu)
+        #[cfg(feature = "vsock-source")]
+        "vsock" => {
+            let port = std::env::var("NIDAN_VSOCK_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(vsock::DEFAULT_VSOCK_PORT);
+            info!(port, "initialisation capturer vsock (écoute côté hôte)");
+            let capturer = vsock::VsockCapturer::new(port)?;
+            return Ok(capturer);
+        }
+        #[cfg(not(feature = "vsock-source"))]
+        "vsock" => {
+            anyhow::bail!("capture vsock demandée mais la feature vsock-source n'est pas compilée");
+        }
         // Capture Wayland via portail ScreenCast + PipeWire
         #[cfg(feature = "pipewire-capture")]
         "wayland" | "pipewire" => {

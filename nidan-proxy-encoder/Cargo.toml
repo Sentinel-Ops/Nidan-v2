@@ -12,6 +12,8 @@ name = "nidan-proxy-encoder"
 path = "src/main.rs"
 
 [dependencies]
+prost        = { version = "0.13", optional = true }
+tokio-vsock  = { version = "0.7", optional = true }
 nidan-proto  = { path = "../nidan-proto" }
 nidan-common = { path = "../nidan-common" }
 tokio        = { workspace = true }
@@ -43,8 +45,11 @@ openh264     = { version = "0.6", optional = true }
 #
 # À l'étape 3, on tourne par défaut avec "stub" + "openh264" pour valider
 # la face client (QUIC/mTLS/E2E) sans dépendre de vsock.
-# À l'étape 5, on ajoutera une feature "vsock-source" pour brancher l'agent
-# via le canal validé à l'étape 2.
-default   = ["stub", "openh264"]
+# À l'étape 5, la feature "vsock-source" branche l'agent via le canal
+# vsock validé à l'étape 2. On peut alors basculer par config :
+#   [capture] backend = "stub"    → StubCapturer (pattern factice)
+#   [capture] backend = "vsock"   → VsockCapturer (reçoit de l'agent)
+default   = ["stub", "openh264", "vsock-source"]
 stub      = []
 openh264  = ["dep:openh264"]
+vsock-source = ["dep:tokio-vsock", "dep:prost"]
