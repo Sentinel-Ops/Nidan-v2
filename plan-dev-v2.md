@@ -415,6 +415,7 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     * 14 frames décodées, 0 droppée
   - Preuve visuelle : dégradé RVB affiché sur écran client (voir capture dans docs/proof/etape5B-ok.png)
   - [Release GitHub v0.5-etape5B-sanzu-fonctionnel](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.5-etape5B-sanzu-fonctionnel) — vidéo + capture
+  - [Release GitHub v0.5.1-etape5C1-wayland-fonctionnel](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.5.1-etape5C1-wayland-fonctionnel) — capture du vrai bureau
 
 - **Prochaine action** : étape 5C — passage à Wayland réel côté agent
   (recompilation avec --features wayland, backend = "pipewire"),
