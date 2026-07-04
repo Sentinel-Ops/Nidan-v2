@@ -435,7 +435,26 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     (dimensions par défaut 1920x1080 dans le proto). Ajustement
     dynamique du proto → post-v2.
   - Preuve visuelle : voir release v0.5.1-etape5C1-wayland-fonctionnel
-- **Prochaine action** : sous-jalon **5C.2** — relais des inputs
-  (patch agent.proto avec variant Inputs, encodage/décodage,
-  injection via RemoteDesktop dans l'agent). Ça rendra le bureau
-  interactif : les clics/touches du client agiront dans la VM.
+
+- **Étape 5C.2 (fait)** : relais des inputs client → agent. Le bureau
+  distant est interactif — clics et touches saisis côté client
+  atteignent la VM.
+  - Patch agent.proto : variant `bytes inputs = 21` dans AgentMessage
+  - Proxy : nouveau `Injector::Vsock` qui sérialise l'InputBatch en JSON
+    et l'envoie sur vsock via le VsockService
+  - Agent : injecteur RemoteDesktop initialisé au démarrage, décodage
+    des InputBatch reçus, injection via portail Wayland
+  - Test réel du 4 juil. 2026 :
+    * 165 frames décodées côté client (0 droppée)
+    * 432 InputBatch injectés dans la VM depuis le client
+    * Session ~1 minute, arrêt volontaire (Event::Quit côté client)
+    * Le vrai bureau GNOME de la VM 192.168.8.100 devient interactif
+      depuis le client Debian 12
+  - La v2 est fonctionnellement complète : le modèle Sanzu SSTIC 2022
+    est concrètement reproduit avec les ajouts propres à ce projet
+    (E2E ChaCha20, QUIC, JWT/mTLS).
+  - Preuve : voir release v0.6-etape5C2-v2-interactive
+- **Prochaine action** : **Étape 6** — documentation Proxmox, service
+  systemd, packages .deb, fix multi-session dans VsockService, VM
+  jetable avec snapshot restauré. Rendre le déploiement reproductible
+  et durcir le cycle de vie des VMs (mode Sanzu original).
