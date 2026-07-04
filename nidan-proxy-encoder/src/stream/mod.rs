@@ -46,12 +46,21 @@ pub struct QuicServer {
     endpoint: quinn::Endpoint,
 }
 
-/// Injecteur d'entrées abstrait : XTEST (X11) ou RemoteDesktop (portail Wayland),
+/// Injecteur d'entrées abstrait : XTEST (X11), RemoteDesktop (portail Wayland),
+/// ou Vsock (relais vers agent NIDAN v2 dans une VM invitée),
 /// choisi à l'exécution selon le backend de capture configuré.
 enum Injector {
     Xtest(crate::input::InputInjector),
     #[cfg(feature = "remotedesktop-input")]
     RemoteDesktop(crate::remote_desktop::RemoteDesktopInjector),
+    /// En mode "vsock" : au lieu d'injecter localement, on sérialise
+    /// l'InputBatch en JSON et on l'envoie sur le canal vsock jusqu'à
+    /// l'agent, qui procédera à l'injection dans la VM invitée.
+    #[cfg(feature = "vsock-source")]
+    Vsock {
+        tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+        count: u64,
+    },
 }
 
 impl Injector {
@@ -60,6 +69,21 @@ impl Injector {
             Injector::Xtest(i) => i.inject_batch(batch),
             #[cfg(feature = "remotedesktop-input")]
             Injector::RemoteDesktop(i) => i.inject_batch(batch),
+            #[cfg(feature = "vsock-source")]
+            Injector::Vsock { tx, count } => {
+                // Sérialisation JSON (même format qu'entre client et proxy)
+                let bytes = serde_json::to_vec(batch)
+                    .context("sérialisation InputBatch pour vsock")?;
+                // Envoi non-bloquant sur le canal vsock. Si le canal est plein,
+                // on log et on drop le batch (les inputs sont pas critiques —
+                // mieux vaut laisser tomber un batch que bloquer la session).
+                if let Err(e) = tx.try_send(bytes) {
+                    tracing::debug!(error = %e, "canal vsock inputs saturé, batch drop");
+                } else {
+                    *count += batch.events.len() as u64;
+                }
+                Ok(())
+            }
         }
     }
     fn set_clipboard(&mut self, content: &[u8]) -> anyhow::Result<()> {
@@ -69,6 +93,9 @@ impl Injector {
             // le collage dans la VM passe par le canal presse-papier dédié.
             #[cfg(feature = "remotedesktop-input")]
             Injector::RemoteDesktop(_) => Ok(()),
+            // Le presse-papier via vsock n'est pas géré à l'étape 5C.
+            #[cfg(feature = "vsock-source")]
+            Injector::Vsock { .. } => Ok(()),
         }
     }
     fn injected_count(&self) -> u64 {
@@ -76,14 +103,17 @@ impl Injector {
             Injector::Xtest(i) => i.injected_count(),
             #[cfg(feature = "remotedesktop-input")]
             Injector::RemoteDesktop(i) => i.injected_count(),
+            #[cfg(feature = "vsock-source")]
+            Injector::Vsock { count, .. } => *count,
         }
     }
 }
 
 impl QuicServer {
     /// Construit l'injecteur adapté au backend de capture.
+    /// - "vsock"              → Vsock (relais vers l'agent NIDAN v2 dans la VM)
     /// - "wayland"/"pipewire" → RemoteDesktop (portail) si la feature est active
-    /// - sinon (ou repli) → XTEST (X11/Xorg)
+    /// - sinon (ou repli)     → XTEST (X11/Xorg)
     fn make_injector(
         backend: &str,
         display: u32,
@@ -92,6 +122,18 @@ impl QuicServer {
         _restore_token: Option<String>,
     ) -> anyhow::Result<Injector> {
         match backend {
+            #[cfg(feature = "vsock-source")]
+            "vsock" => {
+                let service = crate::capture::vsock_service::VsockService::get()
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "VsockService non initialisé — bug de démarrage du proxy"
+                    ))?;
+                tracing::info!("injection via relais vsock vers l'agent");
+                Ok(Injector::Vsock {
+                    tx: service.inputs_tx(),
+                    count: 0,
+                })
+            }
             #[cfg(feature = "remotedesktop-input")]
             "wayland" | "pipewire" => {
                 tracing::info!("injection via portail RemoteDesktop (Wayland)");

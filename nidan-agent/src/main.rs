@@ -118,9 +118,35 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 8. Tâche : consommer les commandes du proxy (pour l'étape 4, on ne
-    //    fait qu'observer ; l'intégration RemoteDesktop viendra à l'étape 5).
+    // 8. Injecteur d'entrées (5C.2). En mode Wayland, on utilise le portail
+    //    RemoteDesktop. Sinon, on log seulement les batches (pas d'injection).
+    #[cfg(feature = "remotedesktop-input")]
+    let injector = {
+        if cfg.input.backend == "remotedesktop" {
+            match crate::remote_desktop::RemoteDesktopInjector::new(
+                start.target_width,
+                start.target_height,
+                None, // pas de restore_token pour l'instant
+            ) {
+                Ok(inj) => {
+                    info!("injecteur RemoteDesktop initialisé");
+                    Some(std::sync::Arc::new(tokio::sync::Mutex::new(inj)))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "injecteur RemoteDesktop non initialisable — inputs ignorés");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+    #[cfg(not(feature = "remotedesktop-input"))]
+    let injector: Option<std::sync::Arc<()>> = None;
+
+    // 9. Tâche : consommer les commandes du proxy (Start/Stop/Inputs).
     let shutdown_cmd = shutdown.clone();
+    let injector_task = injector.clone();
     tokio::spawn(async move {
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
@@ -135,11 +161,36 @@ async fn main() -> anyhow::Result<()> {
                         height = s.target_height,
                         "commande Start (reconfiguration) reçue"
                     );
-                    // À l'étape 5 : reconfigurer le capturer si nécessaire.
+                    // Reconfiguration du capturer non implémentée en 5C.2.
                 }
-                ProxyCommand::Inputs(_bytes) => {
-                    // À l'étape 5 : décoder l'InputBatch et l'injecter via
-                    // RemoteDesktop (ou X11 en fallback).
+                ProxyCommand::Inputs(bytes) => {
+                    // Décoder l'InputBatch v1 (sérialisé JSON par le proxy)
+                    // et l'injecter via RemoteDesktop.
+                    #[cfg(feature = "remotedesktop-input")]
+                    {
+                        let Some(ref inj_arc) = injector_task else {
+                            tracing::debug!("InputBatch reçu mais aucun injecteur (mode non-wayland)");
+                            continue;
+                        };
+                        match serde_json::from_slice::<nidan_proto::InputBatch>(&bytes) {
+                            Ok(batch) => {
+                                let mut guard = inj_arc.lock().await;
+                                if let Err(e) = guard.inject_batch(&batch) {
+                                    tracing::warn!(error = %e, "inject_batch a échoué");
+                                } else {
+                                    tracing::debug!(events = batch.events.len(), "InputBatch injecté");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "décodage InputBatch (JSON) échoué");
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "remotedesktop-input"))]
+                    {
+                        let _ = bytes;
+                        tracing::debug!("InputBatch reçu mais feature remotedesktop-input désactivée");
+                    }
                 }
             }
         }

@@ -140,10 +140,12 @@ pub async fn run_session(
                                         info!("StartCapture reçu en cours de session (reconfiguration)");
                                         let _ = cmd_tx_task.send(ProxyCommand::Start(start)).await;
                                     }
+                                    agent_message::Msg::Inputs(bytes) => {
+                                        debug!(len = bytes.len(), "InputBatch reçu du proxy sur vsock");
+                                        let _ = cmd_tx_task.send(ProxyCommand::Inputs(bytes)).await;
+                                    }
                                     _ => {
-                                        // Les InputBatch seraient là si on les propage via ce canal.
-                                        // Pour l'étape 4, on ne les traite pas encore côté agent.
-                                        debug!("message vsock ignoré (pas encore géré par l'agent)");
+                                        debug!("message vsock ignoré (pas géré côté agent)");
                                     }
                                 }
                             }

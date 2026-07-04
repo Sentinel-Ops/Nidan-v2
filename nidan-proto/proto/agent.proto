@@ -156,7 +156,7 @@ message AgentMessage {
 
         // Données
         RawFrame      frame        = 20;  // agent → proxy (le gros du trafic)
-        // InputBatch inputs       = 21;  // proxy → agent — voir nidan.proto v1
+        bytes         inputs       = 21;  // proxy → agent (blob InputBatch JSON)
 
         // Terminaison
         AgentStopped  stopped      = 30;  // agent → proxy

@@ -222,16 +222,17 @@ async fn run_session(
                     _ = shutdown_inputs.cancelled() => break,
                     maybe_batch = rx.recv() => {
                         let Some(batch_bytes) = maybe_batch else { break; };
-                        // Enveloppe : AgentMessage avec un oneof "inputs" contenant
-                        // un blob. Pour l'étape 5A, on ne réutilise pas encore le
-                        // proto InputBatch v1 (il vit dans nidan-proto en Rust manuel).
-                        // À la place, on envoie un message frame vide + payload — on
-                        // ajoutera un variant "inputs" au proto v2 à l'étape 5B pour
-                        // rester propre. Ici on ignore pour ne pas fausser l'agent.
-                        debug!(len = batch_bytes.len(), "batch d'inputs ignoré (relais vsock à ajouter en 5B)");
-                        // TODO 5B : send_framed_writer(&mut writer_handle,
-                        //   &AgentMessage { msg: Some(agent_message::Msg::Inputs(...))})
-                        let _ = &mut writer_handle;
+                        // Envelopper le blob dans AgentMessage::Inputs et l'envoyer
+                        // sur le canal vsock. L'agent le décodera comme InputBatch v1
+                        // (JSON) et l'injectera via RemoteDesktop.
+                        let msg = AgentMessage {
+                            msg: Some(agent_message::Msg::Inputs(batch_bytes)),
+                        };
+                        if let Err(e) = send_framed(&mut writer_handle, &msg).await {
+                            warn!(error = %e, "erreur envoi InputBatch sur vsock — arrêt du relais");
+                            break;
+                        }
+                        debug!("InputBatch relayé sur vsock");
                     }
                 }
             }

@@ -55,6 +55,11 @@ pub struct VsockService {
     /// fin de session (drop propre) ou en recréer un.
     frames_rx: Arc<Mutex<Option<mpsc::Receiver<RawFrame>>>>,
 
+    /// Émetteur pour relayer les InputBatch (JSON sérialisé) vers l'agent.
+    /// Le VsockCapturer les reçoit et les envoie sur le canal vsock au format
+    /// AgentMessage::Inputs.
+    inputs_tx: mpsc::Sender<Vec<u8>>,
+
     /// Token de shutdown global du service (au moment où le proxy s'arrête).
     _shutdown: CancellationToken,
 
@@ -82,6 +87,7 @@ impl VsockService {
         // Créer le capturer vsock.
         let capturer = super::vsock::VsockCapturer::new(port)?;
         let caps = capturer.capabilities().clone();
+        let inputs_tx = capturer.inputs_tx();
 
         // Créer les channels frames.
         let (frames_tx, frames_rx) = mpsc::channel::<RawFrame>(FRAMES_CHANNEL_SIZE);
@@ -94,6 +100,7 @@ impl VsockService {
         let service = Arc::new(VsockService {
             caps,
             frames_rx: Arc::new(Mutex::new(Some(frames_rx))),
+            inputs_tx,
             _shutdown: shutdown,
             _capturer_handle: cap_handle,
         });
@@ -115,6 +122,13 @@ impl VsockService {
     /// Capacités du capturer (résolution, format).
     pub fn capabilities(&self) -> &CapturerCapabilities {
         &self.caps
+    }
+
+    /// Handle pour envoyer des InputBatch (JSON sérialisé) à l'agent.
+    /// Le stream serveur (côté proxy) utilise ce handle pour relayer les
+    /// entrées reçues du client vers la VM via vsock.
+    pub fn inputs_tx(&self) -> mpsc::Sender<Vec<u8>> {
+        self.inputs_tx.clone()
     }
 
     /// Prend le récepteur de frames pour une session cliente.
