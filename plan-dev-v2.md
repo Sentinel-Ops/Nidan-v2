@@ -413,9 +413,10 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     * proxy → vsock → agent (VM CID 42) → StubCapturer
     * agent → vsock → proxy → H.264 hardware → E2E ChaCha20 → QUIC → client
     * 14 frames décodées, 0 droppée
-  - Preuve visuelle : dégradé RVB affiché sur écran client (voir capture dans docs/proof/etape5B-ok.png)
-  - [Release GitHub v0.5-etape5B-sanzu-fonctionnel](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.5-etape5B-sanzu-fonctionnel) — vidéo + capture
-  - [Release GitHub v0.5.1-etape5C1-wayland-fonctionnel](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.5.1-etape5C1-wayland-fonctionnel) — capture du vrai bureau
+  - Preuve visuelle voir:dégradé RVB affiché sur écran client (voir capture dans docs/proof/etape5B-ok.png)
+  - Preuve visuelle voir:[Release GitHub v0.5-etape5B-sanzu-fonctionnel](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.5-etape5B-sanzu-fonctionnel) — vidéo + capture
+  - Preuve visuelle voir:[Release GitHub v0.5.1-etape5C1-wayland-fonctionnel](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.5.1-etape5C1-wayland-fonctionnel) — capture du vrai bureau
+  - Preuve visuelle voir:[release v0.6-etape5C2-v2-interactive](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.6-etape5C2-v2-interactive)
 
 - **Prochaine action** : étape 5C — passage à Wayland réel côté agent
   (recompilation avec --features wayland, backend = "pipewire"),
