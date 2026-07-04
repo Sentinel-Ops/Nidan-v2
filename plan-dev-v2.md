@@ -117,7 +117,7 @@ Deux petits binaires Rust indépendants du projet NIDAN :
 
 ### Contraintes de travail
 
-**Je ne peux pas tester vsock dans mon environnement** (pas de KVM
+**Je ne peux pas tester vsock dans mon environnement** (pas de KVMPreuve visuelle voir:release v0.6-etape5C2-v2-interactive
 disponible). Je fournis les deux binaires et un guide de test ; toi tu
 les lances sur ton setup Proxmox et tu me remontes les résultats. C'est
 l'étape où on aura besoin d'un aller-retour rapide.
@@ -219,7 +219,7 @@ Créer `nidan-agent` qui tournera dans la VM Ubuntu, à partir du code de
 
 - Crate `nidan-agent` (remplace `nidan-server` dans le workspace v2).
 - Binaire qui, une fois lancé dans la VM, ouvre vsock vers l'hôte et
-  attend `StartCapture`.
+  attend `StartCapture`.Preuve visuelle voir:release v0.6-etape5C2-v2-interactive
 
 ### Critère de validation
 
@@ -415,8 +415,6 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     * 14 frames décodées, 0 droppée
   - Preuve visuelle voir:dégradé RVB affiché sur écran client (voir capture dans docs/proof/etape5B-ok.png)
   - Preuve visuelle voir:[Release GitHub v0.5-etape5B-sanzu-fonctionnel](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.5-etape5B-sanzu-fonctionnel) — vidéo + capture
-  - Preuve visuelle voir:[Release GitHub v0.5.1-etape5C1-wayland-fonctionnel](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.5.1-etape5C1-wayland-fonctionnel) — capture du vrai bureau
-  - Preuve visuelle voir:[release v0.6-etape5C2-v2-interactive](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.6-etape5C2-v2-interactive)
 
 - **Prochaine action** : étape 5C — passage à Wayland réel côté agent
   (recompilation avec --features wayland, backend = "pipewire"),
@@ -436,6 +434,7 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     (dimensions par défaut 1920x1080 dans le proto). Ajustement
     dynamique du proto → post-v2.
   - Preuve visuelle : voir release v0.5.1-etape5C1-wayland-fonctionnel
+  - Preuve visuelle voir:[Release GitHub v0.5.1-etape5C1-wayland-fonctionnel](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.5.1-etape5C1-wayland-fonctionnel) — capture du vrai bureau
 
 - **Étape 5C.2 (fait)** : relais des inputs client → agent. Le bureau
   distant est interactif — clics et touches saisis côté client
@@ -455,6 +454,8 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
     est concrètement reproduit avec les ajouts propres à ce projet
     (E2E ChaCha20, QUIC, JWT/mTLS).
   - Preuve : voir release v0.6-etape5C2-v2-interactive
+  - Preuve visuelle voir:[release v0.6-etape5C2-v2-interactive](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.6-etape5C2-v2-interactive)
+    
 - **Prochaine action** : **Étape 6** — documentation Proxmox, service
   systemd, packages .deb, fix multi-session dans VsockService, VM
   jetable avec snapshot restauré. Rendre le déploiement reproductible
