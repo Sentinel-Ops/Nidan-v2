@@ -30,10 +30,10 @@ toml         = { workspace = true }
 clap         = { workspace = true }
 
 # Capture réelle sous Wayland (portail PipeWire/ScreenCast)
-pipewire  = { version = "0.7",  optional = true }
-ashpd     = { version = "0.10", optional = true }
-libspa    = { version = "0.7",  optional = true }
-pollster  = { version = "0.4",  optional = true }
+pipewire = { version = "0.8", optional = true }
+ashpd    = { version = "0.9", optional = true, default-features = false, features = ["async-std"] }
+libspa   = { version = "0.8", optional = true }
+pollster = { version = "0.3", optional = true }
 
 [features]
 # Configuration minimale de l'agent :
