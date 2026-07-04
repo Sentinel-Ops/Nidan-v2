@@ -419,3 +419,22 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
 - **Prochaine action** : étape 5C — passage à Wayland réel côté agent
   (recompilation avec --features wayland, backend = "pipewire"),
   puis étape 6 pour documentation Proxmox et service systemd.
+
+- **Étape 5C.1 (fait)** : Wayland réel côté agent — le vrai bureau
+  s'affiche côté client (5C.1 = sens frames uniquement, inputs à
+  faire en 5C.2).
+  - Alignement des versions PipeWire du crate nidan-agent sur v1
+    (pipewire 0.8, libspa 0.8, ashpd 0.9, pollster 0.3)
+  - Recompilation `cargo build -p nidan-agent --features wayland`
+  - Config agent : `[capture] backend = "pipewire"`
+  - Test réel : le vrai bureau GNOME de la VM 192.168.8.100
+    s'affiche dans la fenêtre client Debian 12
+  - Capture PipeWire en 1280x800 BGRA (résolution actuelle du bureau)
+  - Note : le bureau apparaît plus petit que la fenêtre client
+    (dimensions par défaut 1920x1080 dans le proto). Ajustement
+    dynamique du proto → post-v2.
+  - Preuve visuelle : voir release v0.5.1-etape5C1-wayland-fonctionnel
+- **Prochaine action** : sous-jalon **5C.2** — relais des inputs
+  (patch agent.proto avec variant Inputs, encodage/décodage,
+  injection via RemoteDesktop dans l'agent). Ça rendra le bureau
+  interactif : les clics/touches du client agiront dans la VM.
