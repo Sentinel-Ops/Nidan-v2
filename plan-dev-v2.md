@@ -8,29 +8,29 @@ trace des choix.
 
 Trois règles qui structurent toute la démarche :
 
-1. **À chaque étape, quelque chose compile et se teste en isolation.**
-   Pas de refactor monolithique de plusieurs jours qui ne compile qu'à la
-   fin. Chaque étape produit un livrable partiel utilisable.
-2. **Après validation d'une étape, on met à jour le repo Nidan-v2.**
-   Chaque étape aboutit à un ou plusieurs commits cohérents avec un
-   message décrivant l'intention (`feat:`, `docs:`, `chore:`).
+1. **À chaque étape, quelque chose compile et se teste en isolation.** Pas de refactor monolithique de plusieurs jours qui ne compile qu'à la
+fin. Chaque étape produit un livrable partiel utilisable.
+2. **Après validation d'une étape, on met à jour le repo Nidan-v2.** Chaque étape aboutit à un ou plusieurs commits cohérents avec un
+message décrivant l'intention (`feat:`, `docs:`, `chore:`).
 3. **On ne casse pas ce qui marche.** Le code v1 est figé sur
-   [Sentinel-Ops/Nidan](https://github.com/Sentinel-Ops/Nidan) au tag
-   `v1.0-fonctionnelle`. La v2 démarre de cet état comme base.
+[Sentinel-Ops/Nidan](https://github.com/Sentinel-Ops/Nidan) au tag
+`v1.0-fonctionnelle`. La v2 démarre de cet état comme base.
 
 ## Vue d'ensemble — 6 étapes
 
-| # | Étape | Livrable | Durée estimée |
-|---|---|---|---|
-| 1 | Cadrer le protocole vsock (Protobuf) | `nidan-proto/proto/agent.proto` | Quelques heures |
-| 2 | Prototype vsock isolé (validation canal) | 2 binaires de test | Quelques heures |
-| 3 | Créer `nidan-proxy-encoder` avec source factice | Crate qui compile + flux test bout-en-bout | 1 jour |
-| 4 | Créer `nidan-agent` (allègement de `nidan-server` v1) | Binaire qui envoie pixels bruts sur vsock | 1 jour |
-| 5 | Intégration bout-en-bout | Chaîne complète client ↔ proxy ↔ vsock ↔ agent ↔ VM | 0.5 à 1 jour |
-| 6 | Documentation Proxmox + polissage | Guide de déploiement + `.deb` | 0.5 jour |
+| # | Étape                                                 | Livrable                                            | Durée estimée   |
+| --- | ----------------------------------------------------- | --------------------------------------------------- | --------------- |
+| 1 | Cadrer le protocole vsock (Protobuf)                  | `nidan-proto/proto/agent.proto`                     | Quelques heures |
+| 2 | Prototype vsock isolé (validation canal)              | 2 binaires de test                                  | Quelques heures |
+| 3 | Créer `nidan-proxy-encoder` avec source factice       | Crate qui compile + flux test bout-en-bout          | 1 jour          |
+| 4 | Créer `nidan-agent` (allègement de `nidan-server` v1) | Binaire qui envoie pixels bruts sur vsock           | 1 jour          |
+| 5 | Intégration bout-en-bout                              | Chaîne complète client ↔ proxy ↔ vsock ↔ agent ↔ VM | 0.5 à 1 jour    |
+| 6 | Documentation Proxmox + robustesse + polissage        | Guide de déploiement + `.deb` + multi-session       | 1 à 2 jours     |
 
-Estimation totale : **4 à 5 jours de développement effectif**, hors
-allers-retours de validation en environnement réel.
+Estimation totale initiale : **4 à 5 jours de développement effectif**, hors
+allers-retours de validation en environnement réel. L'étape 6 s'est étendue
+au-delà de l'estimation initiale suite à la découverte et correction d'un
+bug de fond dans le pipeline d'encodage (voir détail plus bas).
 
 ---
 
@@ -38,20 +38,19 @@ allers-retours de validation en environnement réel.
 
 ### Objectif
 
-Figer le format des messages Protobuf qui circulent sur vsock entre
-`nidan-agent` (VM) et `nidan-proxy-encoder` (hôte). C'est le contrat sur
+Figer le format des messages Protobuf qui circulent sur vsock entre `nidan-agent` (VM) et `nidan-proxy-encoder` (hôte). C'est le contrat sur
 lequel les deux composants sont écrits.
 
 ### Décisions déjà prises
 
 - **Format pixels** : RGBA brut (pas de conversion couleur côté agent).
-  → agent VM le plus simple possible = moindre surface d'attaque dans la VM.
+→ agent VM le plus simple possible = moindre surface d'attaque dans la VM.
 - **Frames complètes** (pas de damage tracking).
-  → comme Sanzu (page 12) ; simplicité et sécurité.
+→ comme Sanzu (page 12) ; simplicité et sécurité.
 - **Proxy commande l'agent** (`StartCapture` / `StopCapture`).
-  → le proxy maîtrise le flux (démarrage, arrêt, reconfiguration).
+→ le proxy maîtrise le flux (démarrage, arrêt, reconfiguration).
 - **Réutilisation d'`InputBatch`** du proto v1 pour les entrées retour.
-  → zéro travail de proto, sémantique déjà validée.
+→ zéro travail de proto, sémantique déjà validée.
 - **Transport pixels VM ↔ hôte** : vsock (AF_VSOCK).
 
 ### Messages à définir
@@ -101,23 +100,24 @@ l'hôte Proxmox, **avant** d'intégrer vsock dans le code NIDAN.
 ### Livrable
 
 Deux petits binaires Rust indépendants du projet NIDAN :
+
 - `vsock-sender` : à lancer dans la VM, génère un flux de test (pattern
-  de pixels) et l'envoie sur vsock.
+de pixels) et l'envoie sur vsock.
 - `vsock-receiver` : à lancer sur l'hôte Proxmox, reçoit le flux et
-  mesure débit / latence / pertes.
+mesure débit / latence / pertes.
 
 ### Ce qu'on valide
 
 - Le module noyau `vhost_vsock` est chargé sur l'hôte.
 - Le device `vhost-vsock-pci` est correctement configuré sur la VM
-  (via l'UI Proxmox ou l'édition de la conf QEMU).
+(via l'UI Proxmox ou l'édition de la conf QEMU).
 - La crate Rust `vsock` (ou `tokio-vsock`) fonctionne comme attendu.
 - Le débit encaisse ~250 Mo/s (débit brut d'un flux 1080p30 RGBA).
 - La latence est acceptable (typiquement < 1 ms pour vsock local).
 
 ### Contraintes de travail
 
-**Je ne peux pas tester vsock dans mon environnement** (pas de KVMPreuve visuelle voir:release v0.6-etape5C2-v2-interactive
+**Je ne peux pas tester vsock dans mon environnement** (pas de KVM
 disponible). Je fournis les deux binaires et un guide de test ; toi tu
 les lances sur ton setup Proxmox et tu me remontes les résultats. C'est
 l'étape où on aura besoin d'un aller-retour rapide.
@@ -146,16 +146,17 @@ ses frames depuis une **source factice** (pas encore l'agent réel).
 ### Base de départ
 
 ~70 % du code de `nidan-server` v1 est réutilisable :
+
 - serveur QUIC (quinn) + mTLS ;
 - handshake E2E (X25519 + HKDF-SHA256) ;
 - encodeur H.264 (openh264) ;
 - gestion de session + JWT.
 
 Ce qui change :
+
 - la source des frames n'est plus la capture Wayland locale, mais une
-  fonction abstraite (trait `FrameSource`) ;
-- pour l'étape 3, on branche une implémentation factice de `FrameSource`
-  (dégradé animé, pattern de test).
+fonction abstraite (trait `FrameSource`) ;
+- pour l'étape 3, on branche une implémentation factice de `FrameSource` (dégradé animé, pattern de test).
 
 ### Livrable
 
@@ -169,6 +170,7 @@ Ce qui change :
 Depuis le client v1 actuel (ou une build légèrement adaptée), on peut se
 connecter au `nidan-proxy-encoder` sur l'hôte et voir le pattern de test
 s'afficher, chiffré E2E. À ce stade :
+
 - l'E2E fonctionne ;
 - l'encodage H.264 fonctionne ;
 - la face QUIC / client fonctionne.
@@ -192,8 +194,7 @@ feat(proxy-encoder): nouveau crate, source factice validée
 
 ### Objectif
 
-Créer `nidan-agent` qui tournera dans la VM Ubuntu, à partir du code de
-`nidan-server` v1 dont on retire tout ce qui n'a plus sa place.
+Créer `nidan-agent` qui tournera dans la VM Ubuntu, à partir du code de `nidan-server` v1 dont on retire tout ce qui n'a plus sa place.
 
 ### Ce qu'on retire de `nidan-server` v1
 
@@ -211,15 +212,15 @@ Créer `nidan-agent` qui tournera dans la VM Ubuntu, à partir du code de
 ### Ce qu'on ajoute
 
 - Un module de sortie vsock : ouverture d'une connexion vsock vers
-  l'hôte (CID = 2), envoi des frames au format `RawFrame` défini en
-  étape 1, réception des `InputBatch` en retour.
+l'hôte (CID = 2), envoi des frames au format `RawFrame` défini en
+étape 1, réception des `InputBatch` en retour.
 - Le protocole d'étape 1 (`AgentHello`, `StartCapture`, etc.).
 
 ### Livrable
 
 - Crate `nidan-agent` (remplace `nidan-server` dans le workspace v2).
 - Binaire qui, une fois lancé dans la VM, ouvre vsock vers l'hôte et
-  attend `StartCapture`.Preuve visuelle voir:release v0.6-etape5C2-v2-interactive
+attend `StartCapture`.
 
 ### Critère de validation
 
@@ -251,24 +252,24 @@ réel.
 ### Ce qu'on fait
 
 - Dans `nidan-proxy-encoder`, ajouter `FrameSource::Vsock` qui se
-  connecte à l'agent VM (CID de la VM, port fixé).
+connecte à l'agent VM (CID de la VM, port fixé).
 - Faire dialoguer proxy et agent selon le protocole d'étape 1.
 - Tester : client → proxy-encoder (hôte) → vsock → agent (VM) → capture
-  Wayland de la VM affichée sur le client.
+Wayland de la VM affichée sur le client.
 
 ### Points de vigilance identifiés
 
 - **Format de pixels PipeWire vs openh264** : PipeWire peut renvoyer
-  BGRA ou RGBA selon le compositeur ; l'agent doit annoncer le bon
-  `PixelFormat` et le proxy adapter l'encodage.
+BGRA ou RGBA selon le compositeur ; l'agent doit annoncer le bon
+`PixelFormat` et le proxy adapter l'encodage.
 - **Timing et buffering** : à ~250 Mo/s, un pipeline mal buffé peut
-  provoquer des à-coups. Prévoir une queue bornée entre vsock et
-  encodeur.
+provoquer des à-coups. Prévoir une queue bornée entre vsock et
+encodeur.
 - **Backpressure** : si l'encodeur est plus lent que l'agent, il faut
-  soit sauter des frames côté agent, soit compter sur le contrôle de
-  flux vsock.
+soit sauter des frames côté agent, soit compter sur le contrôle de
+flux vsock.
 - **Reconnexion** : que se passe-t-il si l'agent redémarre pendant une
-  session ? Prévoir un état « waiting for agent » côté proxy.
+session ? Prévoir un état « waiting for agent » côté proxy.
 
 ### Livrable
 
@@ -294,22 +295,35 @@ feat(integration): source vsock dans le proxy + connexion à l'agent
 
 ---
 
-## Étape 6 — Documentation Proxmox + polissage
+## Étape 6 — Documentation Proxmox + robustesse + polissage
 
 ### Objectif
 
-Rendre la solution déployable par un tiers, avec un guide clair.
+Rendre la solution déployable par un tiers, avec un guide clair, et
+corriger les limitations connues issues des étapes précédentes
+(mono-session, résolution figée, robustesse du pipeline vidéo).
+
+### Découpage en blocs
+
+L'étape 6 a été découpée en blocs indépendants plutôt qu'un unique
+livrable monolithique, pour pouvoir livrer et valider progressivement :
+
+- **Bloc 1** — Documentation Proxmox (déploiement reproductible)
+- **Bloc 2** — Services systemd (proxy, broker, agent)
+- **Bloc 3** — Packages `.deb` (reporté, non prioritaire)
+- **Bloc 4** — Fix multi-session VsockService
+- **Bloc 5** — VM jetable Sanzu-style avec snapshot (reporté, v2.1/v3)
 
 ### Livrables
 
-- `docs/DEPLOIEMENT-PROXMOX.md` : configuration de la VM invitée
-  (device vsock, CID, pare-feu, réseau Internet-only, snapshot pour
-  VM jetable).
-- `docs/INSTALLATION-HOTE.md` : installation de `nidan-proxy-encoder`
-  sur l'hôte Proxmox (systemd, config, TLS).
-- Paquets `.deb` : `nidan-proxy-encoder`, `nidan-agent`,
-  `nidan-client`.
-- Scripts utilitaires (dérivés de la v1) : PKI, permissions.
+- `docs/DEPLOIEMENT-PROXMOX.md` : guide complet 12 sections
+(architecture, prérequis, hôte, VM invitée, PKI, réseau, snapshots,
+dépannage).
+- `docs/INSTALLATION-HOTE.md` / `docs/INSTALLATION-VM.md` : guides
+condensés par machine.
+- `docs/systemd/nidan-proxy-encoder.service`, `nidan-broker.service`,
+`nidan-agent.service` (unité **utilisateur**, pas système, requise
+pour l'accès au portail Wayland via D-Bus utilisateur).
 
 ### Critère de validation
 
@@ -318,18 +332,113 @@ en suivant les docs, sans avoir à demander.
 
 ---
 
+### Bilan détaillé — corrections apportées en étape 6
+
+Au-delà de la documentation initialement prévue, l'étape 6 a englobé une
+session de debug approfondie suite à des régressions et limitations
+identifiées en usage réel prolongé. Le détail est conservé ici pour
+traçabilité, chaque point ayant fait l'objet d'un commit dédié sur la
+branche `main`.
+
+**Fix agent — Ctrl+C propre + persistance des autorisations portail**
+(commit `f6487f5`)
+
+- Ctrl+C ne rendait jamais la main : le timer de vérification du
+shutdown dans la mainloop PipeWire (`capture/pipewire.rs`) était
+enregistré via `add_timer()` mais jamais armé avec un intervalle
+(`update_timer()` manquant). Fix : timer armé à 200 ms.
+- Popup d'autorisation à chaque démarrage de l'agent : ScreenCast et
+RemoteDesktop chargent et sauvegardent désormais leur token de
+restauration dans `~/.local/state/nidan-agent/`. Après une
+autorisation manuelle unique (à faire lors de la préparation du
+template VM), les démarrages suivants sont silencieux.
+
+**Fix couleurs — BGRA→RGB inversé** (commit `b3eff23`)
+
+- Le portail Wayland négocie explicitement du BGRA avec PipeWire, mais
+le buffer livré au capturer contient en réalité l'ordre RGBA. La
+fonction de conversion inversait donc R et B pour rien. Confirmé
+visuellement (logo Leboncoin orange au lieu de bleu après fix).
+
+**Fix multi-session — VsockService via broadcast** (commit `2e09044`)
+
+- Le canal de frames entre l'agent et le proxy était un `mpsc`
+mono-consommateur, "pris" une seule fois. Après une déconnexion
+client, il fallait redémarrer tout le proxy pour retester —
+limitation documentée depuis l'étape 5B, jamais corrigée jusque-là.
+- Remplacé par un canal `broadcast` avec tâche de fan-out permanente :
+chaque nouvelle session cliente s'abonne indépendamment
+(`subscribe_frames_as_mpsc()`), sans affecter les sessions passées ou
+futures. Validé par sessions client successives sans redémarrage du
+proxy.
+
+**Fix résolution dynamique + keep-alive QUIC + robustesse client**
+(commit `37707bd`)
+
+Cinq correctifs combinés, du plus défensif au plus fondamental,
+trouvés lors d'une session de debug approfondie sur un freeze vidéo
+récurrent (10 à 60 secondes de tenue avant ces fixes) :
+
+1. **Résolution dynamique** — le proxy annonçait 1920×1080 par défaut
+au client au lieu des vraies dimensions capturées par l'agent
+(ex. 1280×800). `VsockService::wait_for_agent_capabilities()`
+attend maintenant les vraies dimensions négociées via `AgentHello`
+avant de répondre au client (timeout 30s).
+2. **Keep-alive QUIC** — ni le proxy ni le client ne configuraient de
+`TransportConfig` (défaut quinn : idle timeout 10s, keep-alive
+désactivé). Ajout de `max_idle_timeout=60s` et
+`keep_alive_interval=5s` des deux côtés.
+3. **Retrait du VSync SDL2** — `canvas.present()` avec VSync pouvait
+bloquer indéfiniment lors d'un changement d'écran (bug connu
+SDL2/OpenGL sous Linux). Rendu et capture souris/clavier étant dans
+la même boucle séquentielle côté client, un blocage gelait les
+deux à la fois. Piste réelle mais insuffisante seule pour expliquer
+tous les freezes observés.
+4. **Timeouts défensifs côté client** — l'envoi des `InputBatch` et
+l'envoi des frames vers le décodeur se faisaient via des
+`.send().await` / `write_all()` sans timeout dans la boucle
+`select!` principale. Ajout d'un timeout de 5s sur les deux,
+transformant un gel silencieux et infini en échec propre et
+observable (log d'erreur explicite).
+5. **Cause racine du freeze — flux H.264 100 % IDR** — `is_keyframe`
+était codé en dur à `true` pour **toutes** les frames relayées par
+l'agent (`capture/vsock.rs`). Cascade : `encoder/mod.rs` forçait
+`request_keyframe()` à chaque frame, qui forçait
+`force_intra_frame()` dans `openh264_enc.rs` à chaque frame. Le
+proxy encodait donc **chaque frame en IDR complet, jamais de
+P-frame** — un flux H.264 100 % intra, usage extrêmement atypique
+du codec. La documentation du crate `openh264` indique explicitement
+qu'un encodeur au comportement "exotique" peut produire des flux que
+leur décodeur ne gère pas robustement — cohérent avec le décodage
+anormalement lent observé (120-150 ms/frame, typique d'un flux
+100 % intra) et le blocage silencieux du décodeur après quelques
+dizaines de secondes. **Fix** : seule la toute première frame de la
+session est marquée keyframe ; le reste suit le cycle périodique
+normal de l'encodeur (~20 frames) — flux H.264 IDR+P standard.
+
+**Validation finale** : session de 14+ minutes avec interaction active
+continue (clics, mouvements souris), 5580+ frames envoyées, `kf=false`
+sur l'immense majorité des frames comme attendu, aucun freeze, aucun
+timeout déclenché. Arrêt final volontaire (Ctrl+C), pas un crash.
+
+---
+
 ## Contraintes de mon environnement de travail
 
 Il faut que ce soit dit clairement pour éviter les malentendus :
 
 - **Je ne peux pas exécuter QEMU/KVM.** Donc dès qu'il s'agit de tester
-  vsock, le déploiement Proxmox, ou l'agent dans une VM, c'est **toi
-  qui exécutes**, et on communique les résultats.
-- **Je peux compiler tout le code Rust ici** (avec les dépendances
-  système appropriées).
+vsock, le déploiement Proxmox, ou l'agent dans une VM, c'est **toi
+qui exécutes**, et on communique les résultats.
+- **Je peux compiler tout le code Rust** dans un environnement Linux
+avec les dépendances système appropriées (installées à la demande :
+`libpipewire-0.3-dev`, `libspa-0.2-dev`, `libsdl2-dev`, `clang`,
+`protobuf-compiler`), ce qui a permis de vérifier chaque patch de
+l'étape 6 par compilation réelle avant livraison — y compris le
+linking SDL2 côté client.
 - **Je peux tester tout ce qui ne nécessite pas vsock ou Wayland
-  réels** (proto, encodeur H.264 sur un flux fabriqué, serveur QUIC
-  avec un client simulé).
+réels** (proto, encodeur H.264 sur un flux fabriqué, serveur QUIC
+avec un client simulé).
 
 Chaque étape marque explicitement ce qui est testable ici vs ce qui
 demande ton environnement.
@@ -340,7 +449,7 @@ demande ton environnement.
 
 Après chaque étape validée :
 
-```bash
+```
 cd ~/Documents/NIDAN_SECURITY/nidan-v2
 git add <fichiers de l'étape>
 git commit -m "<message décrit dans l'étape>"
@@ -355,108 +464,92 @@ Un commit par étape (idéalement), ou quelques commits atomiques par
 ## État actuel
 
 - **Étape 0 (fait)** : repo `Nidan-v2` créé, README de fondation
-  poussé, principe (vsock, proxy sur l'hôte) documenté.
+poussé, principe (vsock, proxy sur l'hôte) documenté.
 
 - **Étape 1 (fait)** : `agent.proto` v2 défini, `prost-build` intégré,
-  types Rust générés utilisables (`nidan_proto::agent`).
+types Rust générés utilisables (`nidan_proto::agent`).
 
 - **Étape 2 (fait)** : canal vsock validé sur Proxmox.
-  - VM guest CID=42, hôte CID=2, port 5000.
-  - Test 300 frames RGBA 1920×1080 à 30 fps (~2.5 Go transportés).
-  - Débit mesuré : **248.7 MB/s** (théorique : 248.8), 0 perte, 0 hors ordre.
-  - Le canal vsock encaisse le débit cible sans accumulation de retard.
-  - Note : la latence affichée (~32 ms) par le prototype est un artefact
-    de mesure (décalage d'horloge VM↔hôte non compensé), pas la vraie
-    latence de transit. Une vraie mesure par round-trip sera faite à
-    l'étape 5 (intégration bout-en-bout).
+
+  * VM guest CID=42, hôte CID=2, port 5000.
+  * Test 300 frames RGBA 1920×1080 à 30 fps (~2.5 Go transportés).
+  * Débit mesuré : **248.7 MB/s** (théorique : 248.8), 0 perte, 0 hors ordre.
+  * Le canal vsock encaisse le débit cible sans accumulation de retard.
+  * Note : la latence affichée (~32 ms) par le prototype est un artefact
+de mesure (décalage d'horloge VM↔hôte non compensé), pas la vraie
+latence de transit.
 
 - **Étape 3 (fait)** : crate `nidan-proxy-encoder` créé, face client validée
-  bout-en-bout.
-  - Test réel : client Debian 12 → broker (Ubuntu 20.04)
-    → proxy-encoder v2 (dans VM cible 192.168.8.100)
-  - Handshake mTLS + JWT + E2E ChaCha20 fonctionnels
-  - Encodage H.264 (openh264) + décodage client OK
-  - Rendu SDL2 côté client : dégradé RVB du StubCapturer visible
-    (voir preuve : docs/proofs/etape3-stub-e2e.png)
-  - 20 frames décodées, 0 droppée (le stub s'arrête après quelques
-    secondes — comportement attendu, sera remplacé par VsockCapturer
-    à l'étape 5)
+bout-en-bout.
+
+  * Test réel : client Debian 12 → broker (Ubuntu 20.04)
+→ proxy-encoder v2 (dans VM cible 192.168.8.100)
+  * Handshake mTLS + JWT + E2E ChaCha20 fonctionnels
+  * Encodage H.264 (openh264) + décodage client OK
+  * Rendu SDL2 côté client : dégradé RVB du StubCapturer visible
 
 - **Étape 4 (fait)** : crate `nidan-agent` créé, compilation et démarrage
-  validés dans la VM cible.
-  - `main.rs` + `config.rs` + `vsock_link.rs` (nouveau code)
-  - Trait `Capturer` v1 réutilisé (StubCapturer, PipeWire feature-gated)
-  - Handshake AgentHello ↔ ProxyHelloAck, framing prost sur vsock
-  - Envoi RawFrame (pixels bruts) + réception structurée des commandes
-  - Config allégée : vsock + capture + input (pas de TLS/JWT/session)
-  - Workspace complet compile en 1m12s sans erreur
-  - Agent testé dans la VM cible : démarre, lit sa config depuis
-    /etc/nidan/nidan-agent.toml (via NIDAN_AGENT_CONFIG), initialise le
-    capturer stub (BGRA 1920x1080), tente la connexion vsock vers
-    CID=2 port=6100 → échec attendu (personne n'écoute encore, l'étape 5
-    ajoutera FrameSource::Vsock côté proxy-encoder).
+validés dans la VM cible.
+
+  * `main.rs` + `config.rs` + `vsock_link.rs` (nouveau code)
+  * Trait `Capturer` v1 réutilisé (StubCapturer, PipeWire feature-gated)
+  * Handshake AgentHello ↔ ProxyHelloAck, framing prost sur vsock
+  * Envoi RawFrame (pixels bruts) + réception structurée des commandes
 
 - **Étape 5A (fait)** : VsockCapturer côté proxy-encoder, backend
-  configurable stub/vsock.
-  - Nouveau `capture/vsock.rs` : implémente Capturer, écoute vsock,
-    handshake miroir avec l'agent, réception RawFrame protobuf,
-    conversion vers RawFrame v1 pour l'encodeur H.264.
-  - Feature `vsock-source` par défaut.
-  - Compilation OK, binaire démarre proprement.
+configurable stub/vsock.
 
 - **Étape 5B (fait)** : intégration bout-en-bout validée, modèle Sanzu
-  fonctionnellement démontré.
-  - VsockService global instancié au boot du proxy (modèle A, aligné Sanzu)
-  - Refactor de stream/mod.rs : gestion conditionnelle backend vsock/stub
-  - Test réel bout-en-bout réussi :
-    * client Debian → broker → proxy (HÔTE Proxmox 192.168.8.175)
-    * proxy → vsock → agent (VM CID 42) → StubCapturer
-    * agent → vsock → proxy → H.264 hardware → E2E ChaCha20 → QUIC → client
-    * 14 frames décodées, 0 droppée
-  - Preuve visuelle voir:dégradé RVB affiché sur écran client (voir capture dans docs/proof/etape5B-ok.png)
-  - Preuve visuelle voir:[Release GitHub v0.5-etape5B-sanzu-fonctionnel](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.5-etape5B-sanzu-fonctionnel) — vidéo + capture
+fonctionnellement démontré.
 
-- **Prochaine action** : étape 5C — passage à Wayland réel côté agent
-  (recompilation avec --features wayland, backend = "pipewire"),
-  puis étape 6 pour documentation Proxmox et service systemd.
+  * VsockService global instancié au boot du proxy (modèle A, aligné Sanzu)
+  * Test réel bout-en-bout réussi, 14 frames décodées, 0 droppée
+  * Preuve : [Release GitHub v0.5-etape5B-sanzu-fonctionnel](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.5-etape5B-sanzu-fonctionnel)
 
 - **Étape 5C.1 (fait)** : Wayland réel côté agent — le vrai bureau
-  s'affiche côté client (5C.1 = sens frames uniquement, inputs à
-  faire en 5C.2).
-  - Alignement des versions PipeWire du crate nidan-agent sur v1
-    (pipewire 0.8, libspa 0.8, ashpd 0.9, pollster 0.3)
-  - Recompilation `cargo build -p nidan-agent --features wayland`
-  - Config agent : `[capture] backend = "pipewire"`
-  - Test réel : le vrai bureau GNOME de la VM 192.168.8.100
-    s'affiche dans la fenêtre client Debian 12
-  - Capture PipeWire en 1280x800 BGRA (résolution actuelle du bureau)
-  - Note : le bureau apparaît plus petit que la fenêtre client
-    (dimensions par défaut 1920x1080 dans le proto). Ajustement
-    dynamique du proto → post-v2.
-  - Preuve visuelle : voir release v0.5.1-etape5C1-wayland-fonctionnel
-  - Preuve visuelle voir:[Release GitHub v0.5.1-etape5C1-wayland-fonctionnel](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.5.1-etape5C1-wayland-fonctionnel) — capture du vrai bureau
+s'affiche côté client.
+
+  * Capture PipeWire en 1280x800 BGRA
+  * Preuve : [Release GitHub v0.5.1-etape5C1-wayland-fonctionnel](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.5.1-etape5C1-wayland-fonctionnel)
 
 - **Étape 5C.2 (fait)** : relais des inputs client → agent. Le bureau
-  distant est interactif — clics et touches saisis côté client
-  atteignent la VM.
-  - Patch agent.proto : variant `bytes inputs = 21` dans AgentMessage
-  - Proxy : nouveau `Injector::Vsock` qui sérialise l'InputBatch en JSON
-    et l'envoie sur vsock via le VsockService
-  - Agent : injecteur RemoteDesktop initialisé au démarrage, décodage
-    des InputBatch reçus, injection via portail Wayland
-  - Test réel du 4 juil. 2026 :
-    * 165 frames décodées côté client (0 droppée)
-    * 432 InputBatch injectés dans la VM depuis le client
-    * Session ~1 minute, arrêt volontaire (Event::Quit côté client)
-    * Le vrai bureau GNOME de la VM 192.168.8.100 devient interactif
-      depuis le client Debian 12
-  - La v2 est fonctionnellement complète : le modèle Sanzu SSTIC 2022
-    est concrètement reproduit avec les ajouts propres à ce projet
-    (E2E ChaCha20, QUIC, JWT/mTLS).
-  - Preuve : voir release v0.6-etape5C2-v2-interactive
-  - Preuve visuelle voir:[release v0.6-etape5C2-v2-interactive](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.6-etape5C2-v2-interactive)
-    
-- **Prochaine action** : **Étape 6** — documentation Proxmox, service
-  systemd, packages .deb, fix multi-session dans VsockService, VM
-  jetable avec snapshot restauré. Rendre le déploiement reproductible
-  et durcir le cycle de vie des VMs (mode Sanzu original).
+distant est interactif.
+
+  * 165 frames décodées côté client (0 droppée), 432 InputBatch injectés
+  * La v2 est fonctionnellement complète : le modèle Sanzu SSTIC 2022
+est concrètement reproduit avec les ajouts propres à ce projet
+(E2E ChaCha20, QUIC, JWT/mTLS).
+  * Preuve : [release v0.6-etape5C2-v2-interactive](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.6-etape5C2-v2-interactive)
+
+- **Étape 6, blocs 1+2 (fait)** : documentation Proxmox complète
+(12 sections) + services systemd pour les trois composants
+(proxy, broker, agent en unité utilisateur).
+
+- **Étape 6, fix agent (fait)** : Ctrl+C propre (timer PipeWire armé) +
+persistance des autorisations portail (token ScreenCast/RemoteDesktop
+sauvegardé, plus de popup après la première autorisation).
+
+- **Étape 6, fix couleurs (fait)** : correction de l'inversion
+BGRA/RGB — PipeWire livre du RGBA malgré la négociation BGRA.
+
+- **Étape 6, bloc 4 — fix multi-session (fait)** : VsockService
+refactorisé en canal broadcast + fan-out permanent. Sessions clientes
+successives sans redémarrage du proxy.
+
+- **Étape 6, robustesse pipeline vidéo (fait)** : résolution dynamique,
+keep-alive QUIC, retrait VSync SDL2, timeouts défensifs côté client,
+et **correction de la cause racine du freeze vidéo récurrent** : le
+proxy encodait chaque frame en IDR H.264 complet au lieu d'un flux
+IDR+P normal (bug `is_keyframe` codé en dur). Validé par une session
+de 14+ minutes d'interaction active continue sans freeze ni timeout,
+contre 10 à 60 secondes de tenue auparavant.
+
+- **Prochaine action** : blocs 3 (packages `.deb`) et 5 (VM jetable
+avec snapshot restauré, mode Sanzu original) — reportés en v2.1/v3,
+non bloquants pour un usage courant. Éventuellement : article MISC
+Magazine sur la sécurité VoWiFi (en cours, indépendant de NIDAN),
+poursuite de la préparation aux entretiens sécurité défense/spatial.
+
+## Footer
+
+[https://github.com](https://github.com) © 2026 GitHub, Inc.
