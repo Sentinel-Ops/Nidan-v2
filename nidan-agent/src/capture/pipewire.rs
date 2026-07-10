@@ -102,10 +102,20 @@ impl Capturer for PipeWireCapturer {
 }
 
 /// Négocie une session ScreenCast via ashpd (portail XDG).
+///
+/// Étape 6e (prod) : le token de restauration est chargé depuis un fichier
+/// local et sauvegardé après chaque négociation réussie. Après la toute
+/// première autorisation manuelle (faite une fois lors de la préparation
+/// du template VM), les démarrages suivants ne montrent plus de popup tant
+/// que le token reste valide (PersistMode::ExplicitlyRevoked : persiste
+/// jusqu'à révocation explicite par l'utilisateur via les paramètres GNOME).
 #[cfg(feature = "pipewire-capture")]
 fn negotiate_portal(restore_token: Option<String>) -> Result<PortalStream> {
     use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
     use ashpd::desktop::PersistMode;
+
+    let token_path = screencast_token_path();
+    let saved_token = restore_token.or_else(|| read_token(&token_path));
 
     // ashpd est async ; on bloque le temps de la négociation.
     pollster::block_on(async move {
@@ -118,19 +128,27 @@ fn negotiate_portal(restore_token: Option<String>) -> Result<PortalStream> {
                 CursorMode::Embedded,
                 SourceType::Monitor | SourceType::Window,
                 false, // multiple
-                restore_token.as_deref(),
+                saved_token.as_deref(),
                 PersistMode::ExplicitlyRevoked,
             )
             .await
             .context("sélection des sources")?;
 
-        // Démarre : ouvre l'autorisation utilisateur, retourne les flux.
+        // Démarre : ouvre l'autorisation utilisateur (sauf si un token valide
+        // a été fourni ci-dessus, auquel cas le portail répond directement
+        // sans afficher de popup), retourne les flux.
         let response = proxy
             .start(&session, &ashpd::WindowIdentifier::default())
             .await
             .context("démarrage ScreenCast")?
             .response()
             .context("réponse ScreenCast")?;
+
+        // Sauvegarde le token retourné (nouveau ou reconduit) pour que le
+        // prochain démarrage de l'agent n'affiche plus de popup.
+        if let Some(new_token) = response.restore_token() {
+            write_token(&token_path, new_token);
+        }
 
         let stream = response
             .streams()
@@ -154,6 +172,36 @@ fn negotiate_portal(restore_token: Option<String>) -> Result<PortalStream> {
             height: h as u32,
         })
     })
+}
+
+/// Chemin du fichier de token de restauration ScreenCast.
+/// `~/.local/state/nidan-agent/screencast.token`
+#[cfg(feature = "pipewire-capture")]
+fn screencast_token_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::PathBuf::from(home).join(".local/state/nidan-agent/screencast.token")
+}
+
+/// Lit un token de restauration depuis un fichier, s'il existe et est non vide.
+#[cfg(feature = "pipewire-capture")]
+fn read_token(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Écrit le token de restauration sur disque (crée le dossier si besoin).
+#[cfg(feature = "pipewire-capture")]
+fn write_token(path: &std::path::Path, token: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(path, token) {
+        warn!(error = %e, "impossible d'écrire le token de restauration ScreenCast");
+    } else {
+        info!("token de restauration ScreenCast sauvegardé (démarrages futurs sans popup)");
+    }
 }
 
 /// Boucle PipeWire : reçoit les buffers vidéo et les pousse en `RawFrame`.
@@ -267,7 +315,7 @@ fn run_pipewire_loop(
     // Boucle : on tourne tant que shutdown n'est pas déclenché.
     // On vérifie périodiquement le token via un timer.
     let mainloop_ref = mainloop.clone();
-    let _timer = {
+    let timer = {
         let sd = shutdown.clone();
         mainloop.loop_().add_timer(move |_| {
             if sd.is_cancelled() {
@@ -275,8 +323,16 @@ fn run_pipewire_loop(
             }
         })
     };
-    // Démarre le timer (vérif toutes les 200 ms).
-    // (l'API exacte du timer dépend de la version ; on lance la mainloop)
+    // Arme le timer : premier tir dans 200ms, puis toutes les 200ms.
+    // Sans cet appel, le callback ci-dessus n'est JAMAIS invoqué et
+    // mainloop.run() ne rend jamais la main (Ctrl+C reste sans effet).
+    timer
+        .update_timer(
+            Some(std::time::Duration::from_millis(200)),
+            Some(std::time::Duration::from_millis(200)),
+        )
+        .into_result()
+        .context("armement du timer de shutdown PipeWire")?;
     mainloop.run();
 
     info!("boucle de capture PipeWire arrêtée");
