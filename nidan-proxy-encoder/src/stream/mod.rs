@@ -504,11 +504,11 @@ impl QuicServer {
                             "VsockService non initialisé — bug de démarrage du proxy"
                         ))?;
                     let caps = service.capabilities().clone();
-                    let rx = service.take_frames_receiver().await
-                        .ok_or_else(|| anyhow::anyhow!(
-                            "récepteur vsock déjà consommé (mono-session étape 5B) : \
-                             redémarrer le proxy pour une nouvelle session"
-                        ))?;
+                    // Etape 6f : multi-session. subscribe_frames_as_mpsc()
+                    // remplace take_frames_receiver() -- chaque session
+                    // obtient son propre flux, independant des precedentes.
+                    // Plus besoin de redemarrer le proxy entre deux clients.
+                    let rx = service.subscribe_frames_as_mpsc(session_shutdown.clone());
                     // Fermer tx_raw explicitement (inutilisé dans ce chemin).
                     drop(tx_raw);
                     (caps, None, rx)

@@ -28,7 +28,7 @@ pub mod vsock_service;
 pub mod pipewire;
 
 /// Une frame brute capturée — pixels non compressés
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RawFrame {
     /// Données BGRA ou RGB selon la plateforme
     pub data: Vec<u8>,
