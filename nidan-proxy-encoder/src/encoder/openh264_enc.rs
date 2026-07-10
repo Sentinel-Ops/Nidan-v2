@@ -116,9 +116,9 @@ fn bgra_to_rgb(bgra: &[u8], width: u32, height: u32) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(n * 3);
     let mut i = 0;
     while i + 3 < bgra.len() && rgb.len() < n * 3 {
-        rgb.push(bgra[i + 2]); // R
+        rgb.push(bgra[i]);     // R (PipeWire livre RGBA malgré négociation BGRA)
         rgb.push(bgra[i + 1]); // G
-        rgb.push(bgra[i]);     // B
+        rgb.push(bgra[i + 2]); // B (PipeWire livre RGBA malgré négociation BGRA)
         i += 4;
     }
     // Compléter si nécessaire
