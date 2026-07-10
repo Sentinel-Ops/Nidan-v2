@@ -97,6 +97,13 @@ fn portal_thread(
     // (le bloc async consomme l'original).
     let ready_tx_outer = ready_tx.clone();
 
+    // Étape 6e (prod) : token de restauration chargé depuis un fichier local,
+    // sauvegardé après négociation réussie. PersistMode::ExplicitlyRevoked
+    // (au lieu de DoNot) permet au portail de se souvenir de l'autorisation
+    // entre les démarrages de l'agent.
+    let token_path = remotedesktop_token_path();
+    let saved_token = restore_token.or_else(|| read_token(&token_path));
+
     // Exécuteur async local au thread (ashpd/zbus sont async).
     let result: Result<()> = pollster::block_on(async move {
         let remote = RemoteDesktop::new().await.context("proxy RemoteDesktop")?;
@@ -106,15 +113,12 @@ fn portal_thread(
         let session = remote.create_session().await.context("création session")?;
 
         // Sélection des périphériques : clavier + pointeur.
-        // restore_token ignoré ici : RemoteDesktop n'autorise pas la persistance
-        // (PersistMode::DoNot), donc aucune session ne peut être restaurée.
-        let _ = &restore_token;
         remote
             .select_devices(
                 &session,
                 DeviceType::Keyboard | DeviceType::Pointer,
-                None,
-                PersistMode::DoNot,
+                saved_token.as_deref(),
+                PersistMode::ExplicitlyRevoked,
             )
             .await
             .context("sélection des périphériques")?;
@@ -122,6 +126,12 @@ fn portal_thread(
         // Sélection d'une source écran sur la MÊME session : indispensable pour
         // le positionnement absolu du pointeur (notify_pointer_motion_absolute
         // référence un `stream`).
+        // NOTE (vérifié en conditions réelles) : le portail refuse la
+        // persistance à ce niveau précis quand select_sources est appelé à
+        // l'intérieur d'une session RemoteDesktop combinée — erreur
+        // "Remote desktop sessions cannot persist". La persistance de la
+        // session complète est gouvernée par select_devices() ci-dessus ;
+        // ce sous-appel doit rester DoNot.
         screencast
             .select_sources(
                 &session,
@@ -134,13 +144,20 @@ fn portal_thread(
             .await
             .context("sélection des sources écran")?;
 
-        // Démarrage : affiche la fenêtre d'autorisation du compositeur.
+        // Démarrage : affiche la fenêtre d'autorisation du compositeur, sauf
+        // si un token valide a été fourni ci-dessus (auquel cas c'est silencieux).
         let response = remote
             .start(&session, &ashpd::WindowIdentifier::default())
             .await
             .context("démarrage RemoteDesktop")?
             .response()
             .context("réponse RemoteDesktop")?;
+
+        // Sauvegarde le token retourné pour que le prochain démarrage de
+        // l'agent n'affiche plus de popup.
+        if let Some(new_token) = response.restore_token() {
+            write_token(&token_path, new_token);
+        }
 
         // Node du flux écran (pour le motion absolu). 0 par défaut si absent.
         let stream_node: u32 = response
@@ -266,6 +283,36 @@ async fn apply_event(
         None => {}
     }
     Ok(())
+}
+
+/// Chemin du fichier de token de restauration RemoteDesktop.
+/// `~/.local/state/nidan-agent/remotedesktop.token`
+#[cfg(feature = "remotedesktop-input")]
+fn remotedesktop_token_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::PathBuf::from(home).join(".local/state/nidan-agent/remotedesktop.token")
+}
+
+/// Lit un token de restauration depuis un fichier, s'il existe et est non vide.
+#[cfg(feature = "remotedesktop-input")]
+fn read_token(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Écrit le token de restauration sur disque (crée le dossier si besoin).
+#[cfg(feature = "remotedesktop-input")]
+fn write_token(path: &std::path::Path, token: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(path, token) {
+        warn!(error = %e, "impossible d'écrire le token de restauration RemoteDesktop");
+    } else {
+        info!("token de restauration RemoteDesktop sauvegardé (démarrages futurs sans popup)");
+    }
 }
 
 /// Convertit un scancode SDL2 (basé sur USB HID usage IDs) en keycode evdev
