@@ -49,6 +49,10 @@ pub struct VsockCapturer {
     /// puisse s'y abonner.
     inputs_tx: mpsc::Sender<Vec<u8>>,
     inputs_rx: Arc<Mutex<Option<mpsc::Receiver<Vec<u8>>>>>,
+    /// Etape 6c : etat partage des capabilities, rempli a AgentHello.
+    shared_caps: Option<Arc<tokio::sync::RwLock<Option<CapturerCapabilities>>>>,
+    /// Etape 6c : notifieur reveille quand shared_caps est mis a jour.
+    caps_notify: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl VsockCapturer {
@@ -66,6 +70,32 @@ impl VsockCapturer {
             caps,
             inputs_tx,
             inputs_rx: Arc::new(Mutex::new(Some(inputs_rx))),
+            shared_caps: None,
+            caps_notify: None,
+        }))
+    }
+
+    /// Etape 6c : constructeur avec caps partagees, mis a jour a AgentHello.
+    pub fn new_with_shared_caps(
+        port: u32,
+        shared_caps: Arc<tokio::sync::RwLock<Option<CapturerCapabilities>>>,
+        caps_notify: Arc<tokio::sync::Notify>,
+    ) -> Result<Arc<Self>> {
+        let caps = CapturerCapabilities {
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+            supports_xshm: false,
+            supports_xdamage: false,
+            pixel_format: V1PixelFormat::Bgra8888,
+        };
+        let (inputs_tx, inputs_rx) = mpsc::channel::<Vec<u8>>(64);
+        Ok(Arc::new(VsockCapturer {
+            port,
+            caps,
+            inputs_tx,
+            inputs_rx: Arc::new(Mutex::new(Some(inputs_rx))),
+            shared_caps: Some(shared_caps),
+            caps_notify: Some(caps_notify),
         }))
     }
 
@@ -139,6 +169,8 @@ impl Capturer for VsockCapturer {
                             inputs_rx,
                             fps_limit,
                             shutdown.clone(),
+                            self.shared_caps.clone(),
+                            self.caps_notify.clone(),
                         )
                         .await;
 
@@ -161,6 +193,8 @@ async fn run_session(
     inputs_rx: Option<mpsc::Receiver<Vec<u8>>>,
     fps_limit: u32,
     shutdown: CancellationToken,
+    shared_caps_opt: Option<Arc<tokio::sync::RwLock<Option<CapturerCapabilities>>>>,
+    caps_notify_opt: Option<Arc<tokio::sync::Notify>>,
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(stream);
 
@@ -177,6 +211,26 @@ async fn run_session(
         max_fps = hello.max_fps,
         "AgentHello reçu"
     );
+
+    // Etape 6c : mise a jour des capabilities partagees avec les vraies dimensions.
+    if let (Some(shared), Some(notify)) = (&shared_caps_opt, &caps_notify_opt) {
+        let real_caps = CapturerCapabilities {
+            width: if hello.native_width > 0 { hello.native_width } else { DEFAULT_WIDTH },
+            height: if hello.native_height > 0 { hello.native_height } else { DEFAULT_HEIGHT },
+            supports_xshm: false,
+            supports_xdamage: false,
+            pixel_format: V1PixelFormat::Bgra8888,
+        };
+        let mut guard = shared.write().await;
+        *guard = Some(real_caps.clone());
+        drop(guard);
+        notify.notify_waiters();
+        info!(
+            width = real_caps.width,
+            height = real_caps.height,
+            "capabilities partagees mises a jour"
+        );
+    }
 
     // 2. Choisir un format supporté par l'agent, en préférant le premier annoncé
     // (par convention agent : premier = format natif du capturer local).
@@ -262,6 +316,25 @@ async fn run_session(
                 match msg.msg {
                     Some(agent_message::Msg::Frame(proto_frame)) => {
                         // Conversion : ProtoRawFrame v2 → RawFrame v1 (attendue par l'encodeur).
+                        // Étape 6i : BUG TROUVÉ — avant, is_keyframe était codé en
+                        // dur à `true` pour TOUTES les frames ("pas d'info
+                        // différentielle sur vsock pour l'instant"). Ça forçait
+                        // l'encodeur à produire un IDR complet sur CHAQUE frame
+                        // (voir encoder/mod.rs : `if raw_frame.is_keyframe {
+                        // encoder.request_keyframe() }`, exécuté à chaque appel).
+                        // Un flux 100% IDR (jamais de P-frame) est un usage très
+                        // atypique de H.264 — la doc du crate openh264 indique
+                        // explicitement qu'un encodeur au comportement "exotique"
+                        // peut produire des flux que leur décodeur ne gère pas
+                        // proprement. C'est cohérent avec le décodage anormalement
+                        // lent observé (120-150ms/frame, typique d'un flux
+                        // uniquement en intra) et le blocage du décodeur après
+                        // quelques dizaines de secondes.
+                        // Fix : seule la toute première frame de la session est
+                        // marquée keyframe. L'encodeur gère ensuite normalement
+                        // son cycle périodique (keyframe_interval, ~toutes les
+                        // 20 frames par défaut), produisant un flux IDR+P normal.
+                        let is_keyframe = frames_recv == 0;
                         let raw = RawFrame {
                             data:         proto_frame.pixels,
                             width:        proto_frame.width,
@@ -269,7 +342,7 @@ async fn run_session(
                             stride:       proto_frame.stride_bytes,
                             timestamp_us: proto_frame.timestamp_us,
                             seq:          proto_frame.frame_seq,
-                            is_keyframe:  true, // pas d'info différentielle sur vsock pour l'instant
+                            is_keyframe,
                             damage_rects: vec![],
                         };
                         if frames_tx.send(raw).await.is_err() {

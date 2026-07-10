@@ -54,7 +54,15 @@ impl NidanClient {
         let tls_config = Self::build_tls_config(&config)
             .context("configuration TLS client")?;
 
-        let client_config = quinn::ClientConfig::new(Arc::new(tls_config));
+        // Étape 6d : même config que côté proxy — voir le commentaire dans
+        // nidan-proxy-encoder/src/stream/mod.rs pour le détail du mécanisme.
+        let mut transport_config = quinn::TransportConfig::default();
+        transport_config
+            .max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into()?))
+            .keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+
+        let mut client_config = quinn::ClientConfig::new(Arc::new(tls_config));
+        client_config.transport_config(Arc::new(transport_config));
 
         // Bind local sur port aléatoire
         let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())
@@ -321,7 +329,27 @@ impl NidanClient {
                                     continue;
                                 }
                             }
-                            if tx_dec_in.send(frame).await.is_err() { break; }
+                            // Étape 6h bis : même mécanisme de protection que
+                            // pour l'envoi des InputBatch (voir plus bas). Si
+                            // le décodeur se bloque (frame corrompue, bug
+                            // interne openh264/FFmpeg), ce canal borné (8
+                            // emplacements) se remplit et ce .send().await
+                            // bloquerait indéfiniment TOUTE la boucle select
+                            // — vidéo ET inputs. Le décodage prend déjà
+                            // 120-150ms/frame en usage normal (mesuré), donc
+                            // un vrai blocage interne est plausible.
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                tx_dec_in.send(frame)
+                            ).await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(_)) => break,
+                                Err(_) => {
+                                    error!("timeout (5s) envoi frame au décodeur — \
+                                            décodeur probablement bloqué, fin de session");
+                                    break;
+                                }
+                            }
                         }
                         None => { warn!("flux vidéo terminé"); break; }
                     }
@@ -333,9 +361,30 @@ impl NidanClient {
                 }
 
                 // InputBatch → envoi au serveur sur le stream de contrôle
+                // Étape 6h : send_input_batch() fait des write_all() directs
+                // sur le stream QUIC, SANS timeout. Si cette écriture se
+                // bloque (contrôle de flux QUIC bloqué, stream qui ne se
+                // vide plus), elle attend indéfiniment — et comme c'est
+                // dans la MÊME boucle select! que la réception vidéo
+                // (ci-dessus), toute la boucle se fige : vidéo ET inputs
+                // en même temps. C'est le mécanisme exact du "freeze"
+                // observé (confirmé par logs : proxy et agent arrêtent de
+                // voir des InputBatch pile au moment où le client se fige,
+                // alors que l'utilisateur continue de bouger la souris).
                 Some(batch) = rx_batch.recv() => {
-                    if let Err(e) = Self::send_input_batch(&mut ctrl_tx, &batch, control_cipher.as_mut()).await {
-                        warn!(error = %e, "erreur envoi inputs");
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        Self::send_input_batch(&mut ctrl_tx, &batch, control_cipher.as_mut())
+                    ).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            warn!(error = %e, "erreur envoi inputs");
+                        }
+                        Err(_) => {
+                            error!("timeout (5s) envoi InputBatch sur stream de contrôle — \
+                                    connexion probablement bloquée, fin de session");
+                            break;
+                        }
                     }
                 }
 

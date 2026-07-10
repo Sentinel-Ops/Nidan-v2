@@ -62,10 +62,18 @@ fn run_sdl2_real(
     }
 
     let window = window_builder.build().context("création fenêtre SDL2")?;
+    // Étape 6g : PAS de present_vsync(). Le VSync attend le signal de
+    // rafraîchissement de l'écran local pour retourner de canvas.present().
+    // Si la fenêtre est déplacée d'un écran à un autre pendant l'exécution
+    // (taux de rafraîchissement différent, compositeur qui renégocie le
+    // pipeline de rendu), cet appel peut bloquer INDÉFINIMENT — gelant toute
+    // la boucle (rendu ET capture souris/clavier, car séquentiels dans la
+    // même boucle). Le contenu vidéo est de toute façon plafonné à ~7 fps
+    // par le décodage, bien en dessous de tout taux de rafraîchissement :
+    // le VSync n'apporte aucun bénéfice ici, seulement un risque de blocage.
     let mut canvas = window
         .into_canvas()
         .accelerated()
-        .present_vsync()
         .build()
         .context("création canvas SDL2")?;
 

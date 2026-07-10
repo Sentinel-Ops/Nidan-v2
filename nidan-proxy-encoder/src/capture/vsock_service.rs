@@ -53,7 +53,9 @@
 use anyhow::{anyhow, Result};
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
+use std::time::Duration;
+use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -68,12 +70,25 @@ const FRAMES_CHANNEL_SIZE: usize = 8;
 /// pipeline — comportement volontaire, pas un bug.
 const BROADCAST_CHANNEL_SIZE: usize = 8;
 
+/// Étape 6c : délai maximum d'attente qu'un agent se connecte avant de
+/// rejeter une session cliente avec une erreur claire.
+pub const DEFAULT_AGENT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Le service singleton. Instancié une fois au boot du proxy, réutilisé
 /// par toutes les sessions.
 pub struct VsockService {
-    /// Capacités annoncées par le capturer vsock. Utilisées par la session
-    /// pour configurer l'encodeur (résolution, format).
-    caps: CapturerCapabilities,
+    /// Étape 6c : capacités **négociées avec l'agent** (vraies dimensions).
+    /// `None` tant qu'aucun agent ne s'est connecté ; rempli après le
+    /// premier `AgentHello`. Une session cliente doit attendre que cette
+    /// valeur soit disponible via `wait_for_agent_capabilities()` avant
+    /// d'annoncer les dimensions au client — sinon on retombe sur les
+    /// valeurs par défaut (1920×1080), sans rapport avec ce que l'agent
+    /// capture réellement.
+    agent_caps: Arc<RwLock<Option<CapturerCapabilities>>>,
+
+    /// Notifieur réveillé à chaque connexion agent (permet aux sessions
+    /// clientes en attente de récupérer les nouvelles capabilities).
+    caps_notify: Arc<tokio::sync::Notify>,
 
     /// Diffuse chaque `RawFrame` reçue de l'agent à tous les abonnés actifs.
     /// Voir la doc de module pour le détail du mécanisme multi-session.
@@ -111,9 +126,16 @@ impl VsockService {
 
         info!(port, fps_limit, "démarrage du VsockService global (modèle A, multi-session)");
 
-        // Créer le capturer vsock.
-        let capturer = super::vsock::VsockCapturer::new(port)?;
-        let caps = capturer.capabilities().clone();
+        // État partagé pour les capabilities de l'agent (étape 6c).
+        let agent_caps: Arc<RwLock<Option<CapturerCapabilities>>> = Arc::new(RwLock::new(None));
+        let caps_notify = Arc::new(tokio::sync::Notify::new());
+
+        // Créer le capturer vsock avec un pointeur vers l'état partagé.
+        let capturer = super::vsock::VsockCapturer::new_with_shared_caps(
+            port,
+            agent_caps.clone(),
+            caps_notify.clone(),
+        )?;
         let inputs_tx = capturer.inputs_tx();
 
         // Canal interne unique : VsockCapturer → tâche de fan-out.
@@ -167,7 +189,8 @@ impl VsockService {
 
         // Construire le service.
         let service = Arc::new(VsockService {
-            caps,
+            agent_caps,
+            caps_notify,
             frames_broadcast: broadcast_tx,
             inputs_tx,
             _shutdown: shutdown,
@@ -189,9 +212,68 @@ impl VsockService {
         SERVICE.get().cloned()
     }
 
-    /// Capacités du capturer (résolution, format).
-    pub fn capabilities(&self) -> &CapturerCapabilities {
-        &self.caps
+    /// Étape 6c : capacités **actuelles** de l'agent connecté, sans attendre.
+    /// Retourne `None` si aucun agent n'est connecté pour l'instant.
+    pub async fn current_capabilities(&self) -> Option<CapturerCapabilities> {
+        self.agent_caps.read().await.clone()
+    }
+
+    /// Étape 6c : attend qu'un agent soit connecté et retourne ses vraies
+    /// capacités (dimensions réelles capturées, format, etc.).
+    ///
+    /// Si un agent est déjà connecté au moment de l'appel, retourne
+    /// immédiatement. Sinon, bloque jusqu'à connexion ou timeout — évite
+    /// d'annoncer au client des dimensions par défaut qui ne correspondent
+    /// pas à la réalité (1920×1080 alors que l'agent capture en 1280×800,
+    /// par exemple).
+    pub async fn wait_for_agent_capabilities(
+        &self,
+        max_wait: Duration,
+    ) -> Result<CapturerCapabilities> {
+        {
+            let guard = self.agent_caps.read().await;
+            if let Some(caps) = guard.as_ref() {
+                return Ok(caps.clone());
+            }
+        }
+
+        info!(
+            timeout_secs = max_wait.as_secs(),
+            "session cliente en attente de la connexion agent…"
+        );
+
+        let result = timeout(max_wait, async {
+            loop {
+                self.caps_notify.notified().await;
+                let guard = self.agent_caps.read().await;
+                if let Some(caps) = guard.as_ref() {
+                    return caps.clone();
+                }
+            }
+        })
+        .await;
+
+        match result {
+            Ok(caps) => {
+                info!(
+                    width = caps.width,
+                    height = caps.height,
+                    "agent connecté, capabilities récupérées pour la session cliente"
+                );
+                Ok(caps)
+            }
+            Err(_) => {
+                warn!(
+                    timeout_secs = max_wait.as_secs(),
+                    "timeout : aucun agent connecté dans le délai — session cliente rejetée"
+                );
+                Err(anyhow!(
+                    "timeout après {}s : aucun agent connecté sur vsock. \
+                     Vérifier que nidan-agent tourne dans la VM invitée.",
+                    max_wait.as_secs()
+                ))
+            }
+        }
     }
 
     /// Handle pour envoyer des InputBatch (JSON sérialisé) à l'agent.

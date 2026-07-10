@@ -158,7 +158,20 @@ impl QuicServer {
         let tls_config = Self::build_tls_config(&config)
             .context("configuration TLS")?;
 
-        let server_config = quinn::ServerConfig::with_crypto(Arc::new(tls_config));
+        // Étape 6d : keep-alive + idle timeout généreux. Par défaut, quinn ferme
+        // une connexion après seulement 10s d'inactivité totale (aucun paquet
+        // envoyé/reçu, ACK compris) et n'envoie aucun keep-alive. Or PipeWire ne
+        // pousse des frames que lors de changements d'écran (mode "damage-based") :
+        // sur un bureau peu actif, cette fenêtre de silence peut dépasser 10s et
+        // la session QUIC meurt ("connection lost"), ce qui cascade jusqu'à casser
+        // le canal vsock avec l'agent.
+        let mut transport_config = quinn::TransportConfig::default();
+        transport_config
+            .max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into()?))
+            .keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+
+        let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(tls_config));
+        server_config.transport_config(Arc::new(transport_config));
         let endpoint = quinn::Endpoint::server(server_config, bind_addr)
             .with_context(|| format!("bind QUIC sur {}", bind_addr))?;
 
@@ -304,9 +317,25 @@ impl QuicServer {
             .ok();
 
         // Résolution réelle capturée (défaut 1280x720 si caps indisponibles)
-        let (cap_w, cap_h) = caps.as_ref()
+        let (mut cap_w, mut cap_h) = caps.as_ref()
             .map(|c| (c.width, c.height))
             .unwrap_or((1280, 720));
+
+        // Etape 6c bis : pour le backend vsock, surcharger avec les vraies
+        // dimensions négociées avec l'agent (via AgentHello). Sinon le ACK
+        // envoie des valeurs par défaut (1920×1080) et le client crée sa
+        // texture SDL2 aux mauvaises dimensions.
+        if config.capture.backend == "vsock" {
+            if let Some(service) = crate::capture::vsock_service::VsockService::get() {
+                let real_caps = service.wait_for_agent_capabilities(
+                    crate::capture::vsock_service::DEFAULT_AGENT_WAIT_TIMEOUT
+                ).await?;
+                cap_w = real_caps.width;
+                cap_h = real_caps.height;
+                tracing::info!(width = cap_w, height = cap_h,
+                    "ACK client : dimensions réelles de l'agent utilisées");
+            }
+        }
 
         // Échange de clés E2E (X25519) si le client a fourni sa clé publique
         let e2e_enabled = config.security.e2e_encryption
@@ -503,11 +532,14 @@ impl QuicServer {
                         .ok_or_else(|| anyhow::anyhow!(
                             "VsockService non initialisé — bug de démarrage du proxy"
                         ))?;
-                    let caps = service.capabilities().clone();
-                    // Etape 6f : multi-session. subscribe_frames_as_mpsc()
-                    // remplace take_frames_receiver() -- chaque session
-                    // obtient son propre flux, independant des precedentes.
-                    // Plus besoin de redemarrer le proxy entre deux clients.
+                    // Étape 6c : attendre les vraies dimensions négociées avec l'agent.
+                    let caps = service.wait_for_agent_capabilities(
+                        crate::capture::vsock_service::DEFAULT_AGENT_WAIT_TIMEOUT
+                    ).await?;
+                    // Étape 6f : multi-session. subscribe_frames_as_mpsc()
+                    // remplace take_frames_receiver() — chaque session
+                    // obtient son propre flux, indépendant des précédentes.
+                    // Plus besoin de redémarrer le proxy entre deux clients.
                     let rx = service.subscribe_frames_as_mpsc(session_shutdown.clone());
                     // Fermer tx_raw explicitement (inutilisé dans ce chemin).
                     drop(tx_raw);
