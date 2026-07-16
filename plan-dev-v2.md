@@ -421,6 +421,58 @@ continue (clics, mouvements souris), 5580+ frames envoyées, `kf=false`
 sur l'immense majorité des frames comme attendu, aucun freeze, aucun
 timeout déclenché. Arrêt final volontaire (Ctrl+C), pas un crash.
 
+**Fix relais inputs sur reconnexions vsock — multi-session inputs**
+(commit `85e03f3`, tag `v0.7.1-etape6i-multisession-inputs`)
+
+Bug découvert après validation en usage prolongé : à partir de la 2ᵉ
+connexion agent au proxy (soit après un simple restart de l'agent, soit
+sur une reconnexion agent suite à une coupure vsock), la session
+s'établissait, la vidéo s'affichait normalement, mais **aucune
+interaction clavier/souris n'était plus injectée dans la VM**. Côté
+agent, un WARN systématique : `nidan_agent::vsock_link: erreur lecture
+vsock — fermeture de la boucle reader error=lecture longueur`.
+
+**Cause racine** dans `nidan-proxy-encoder/src/capture/vsock.rs` :
+
+- Le champ `inputs_rx: Arc<Mutex<Option<Receiver>>>` était consommé via
+`guard.take()` à la première session, et **jamais repeuplé** malgré le
+commentaire qui décrivait l'intention. Les sessions suivantes récupéraient
+donc `None`.
+- La branche `else` de `run_session` (en cas de `None`) faisait un
+`writer.shutdown().await` — un half-close TCP-like côté proxy. Côté
+agent, ce half-close se traduisait par un EOF immédiat sur le
+`read_exact(len)` du reader vsock, ce qui tuait sa `reader_task`.
+- Résultat : le canal proxy → agent était fonctionnellement coupé
+dès la 2ᵉ session. Aucun `AgentMessage::Inputs` ne pouvait plus
+descendre. Frames agent → proxy toujours OK (writer côté agent
+intact), d'où le symptôme : image affichée mais interaction morte.
+
+**Correction** :
+
+- Champ transformé en `Arc<Mutex<Receiver>>` (sans `Option`) : le
+receiver vit pour toute la durée du process, ce qui préserve les
+`inputs_tx` déjà clonés et distribués au `VsockService`.
+- À chaque nouvelle session, on prête un clone de l'`Arc<Mutex>` à
+`run_session`. La boucle de relais garde le `MutexGuard` pendant
+toute sa durée puis le libère au drop — la prochaine session peut à
+son tour lock et relayer, sans recréation de canal.
+- Comme le `VsockCapturer` est mono-session par VM cible (une seule
+connexion agent active à la fois), la contention sur le Mutex est
+nulle en pratique.
+- La branche `else { writer.shutdown() }` a été supprimée : elle
+n'a plus de raison d'être puisque le receiver est toujours disponible.
+- La boucle de relais est extraite en `run_inputs_relay<W: AsyncWrite>`,
+générique sur le transport, ce qui permet trois tests unitaires
+(`tokio::io::duplex`) sans dépendre du kernel vsock :
+  * `inputs_relay_survives_multiple_sessions` — régression directe du bug.
+  * `inputs_relay_terminates_on_shutdown` — libération propre du guard.
+  * `inputs_relay_preserves_batch_bytes` — framing bit-exact préservé.
+
+**Validation terrain** : reconnexion agent puis session cliente sans
+redémarrage du proxy → inputs fonctionnels, plus aucun WARN
+`lecture longueur` côté agent, `InputBatch relayé sur vsock` visible en
+`RUST_LOG=nidan_proxy_encoder::capture::vsock=debug` à chaque frappe.
+
 ---
 
 ## Contraintes de mon environnement de travail
@@ -543,6 +595,17 @@ proxy encodait chaque frame en IDR H.264 complet au lieu d'un flux
 IDR+P normal (bug `is_keyframe` codé en dur). Validé par une session
 de 14+ minutes d'interaction active continue sans freeze ni timeout,
 contre 10 à 60 secondes de tenue auparavant.
+
+- **Étape 6i-bis, fix inputs multi-session (fait)** : correction du
+relais des `InputBatch` proxy → agent sur les reconnexions vsock.
+`Arc<Mutex<Option<Receiver>>>` remplacé par `Arc<Mutex<Receiver>>`
+(receiver jamais consommé, prêté aux sessions successives via
+`MutexGuard`), suppression de la branche `else { writer.shutdown() }`
+qui coupait le canal côté agent. Trois tests unitaires ajoutés
+(dont la régression directe). Validé en conditions réelles :
+reconnexion agent → inputs fonctionnels, plus aucun WARN
+`lecture longueur` côté agent.
+Preuve : [tag v0.7.1-etape6i-multisession-inputs](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.7.1-etape6i-multisession-inputs)
 
 - **Prochaine action** : blocs 3 (packages `.deb`) et 5 (VM jetable
 avec snapshot restauré, mode Sanzu original) — reportés en v2.1/v3,
