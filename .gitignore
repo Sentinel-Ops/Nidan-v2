@@ -9,3 +9,4 @@ nidan.toml
 /certs/
 /sessions/
 Cargo.lock.bak
+*.bak
