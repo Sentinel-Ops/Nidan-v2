@@ -48,7 +48,24 @@ pub struct VsockCapturer {
     /// Rendu accessible via `inputs_tx()` pour que le code du stream
     /// puisse s'y abonner.
     inputs_tx: mpsc::Sender<Vec<u8>>,
-    inputs_rx: Arc<Mutex<Option<mpsc::Receiver<Vec<u8>>>>>,
+    /// Étape 6i-bis : le receiver du canal inputs vit pour toute la durée du
+    /// process, partagé sous Mutex entre les sessions vsock successives.
+    ///
+    /// Ancien design : `Arc<Mutex<Option<Receiver>>>` avec `guard.take()` à
+    /// chaque session. Bug : après la première session, le `Option` restait
+    /// `None` définitivement (aucun code ne le repopulait, malgré le commentaire
+    /// qui décrivait l'intention). Toutes les sessions suivantes tombaient
+    /// dans la branche `else` de `run_session` qui faisait un `writer.shutdown()`.
+    /// Ce half-close côté proxy provoquait un EOF sur le reader de l'agent
+    /// (WARN "erreur lecture vsock — lecture longueur"), ce qui tuait sa
+    /// reader_task et empêchait toute injection d'input (fenêtre affichée
+    /// mais aucune interaction possible).
+    ///
+    /// Nouveau design : le receiver n'est jamais `take()`é, on le prête via un
+    /// `MutexGuard` détenu par la session en cours. Comme le VsockCapturer est
+    /// mono-session par VM (une seule connexion agent active à la fois), la
+    /// contention sur ce Mutex est nulle en pratique.
+    inputs_rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
     /// Etape 6c : etat partage des capabilities, rempli a AgentHello.
     shared_caps: Option<Arc<tokio::sync::RwLock<Option<CapturerCapabilities>>>>,
     /// Etape 6c : notifieur reveille quand shared_caps est mis a jour.
@@ -69,7 +86,7 @@ impl VsockCapturer {
             port,
             caps,
             inputs_tx,
-            inputs_rx: Arc::new(Mutex::new(Some(inputs_rx))),
+            inputs_rx: Arc::new(Mutex::new(inputs_rx)),
             shared_caps: None,
             caps_notify: None,
         }))
@@ -93,7 +110,7 @@ impl VsockCapturer {
             port,
             caps,
             inputs_tx,
-            inputs_rx: Arc::new(Mutex::new(Some(inputs_rx))),
+            inputs_rx: Arc::new(Mutex::new(inputs_rx)),
             shared_caps: Some(shared_caps),
             caps_notify: Some(caps_notify),
         }))
@@ -153,13 +170,14 @@ impl Capturer for VsockCapturer {
                             "VsockCapturer : agent connecté"
                         );
 
-                        // Reprend le receiver d'inputs (déplacé dans la session).
-                        // Si une session précédente l'a déjà consommé, on en crée
-                        // un nouveau — cas où l'agent reconnecte après crash.
-                        let inputs_rx = {
-                            let mut guard = inputs_rx_arc.lock().await;
-                            guard.take()
-                        };
+                        // Étape 6i-bis : on ne consomme plus le receiver, on le
+                        // prête à la session via un clone de l'Arc<Mutex>. La
+                        // session lock le Mutex pour toute sa durée, puis le
+                        // libère au drop — la prochaine session peut à nouveau
+                        // relayer les inputs sans qu'on ait à recréer le canal
+                        // (ce qui aurait invalidé les `inputs_tx` déjà distribués
+                        // au VsockService).
+                        let inputs_rx = Arc::clone(&inputs_rx_arc);
 
                         // Une session complète est gérée. Elle se termine soit
                         // sur EOF de l'agent, soit sur shutdown, soit sur erreur.
@@ -190,7 +208,7 @@ impl Capturer for VsockCapturer {
 async fn run_session(
     stream: tokio_vsock::VsockStream,
     frames_tx: mpsc::Sender<RawFrame>,
-    inputs_rx: Option<mpsc::Receiver<Vec<u8>>>,
+    inputs_rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
     fps_limit: u32,
     shutdown: CancellationToken,
     shared_caps_opt: Option<Arc<tokio::sync::RwLock<Option<CapturerCapabilities>>>>,
@@ -267,34 +285,19 @@ async fn run_session(
     info!(target_width, target_height, target_fps = fps, "StartCapture envoyé — session active");
 
     // 5. Tâche parallèle : relayer les inputs (proxy → agent).
-    let inputs_task = if let Some(mut rx) = inputs_rx {
-        let mut writer_handle = writer;
+    //
+    // Étape 6i-bis : la branche `else { writer.shutdown() }` de l'ancienne
+    // version a été supprimée — ce half-close côté proxy fermait le reader de
+    // l'agent (EOF sur read_exact(len)), tuait sa reader_task et empêchait
+    // toute injection d'input pour les sessions 2+. Le receiver est maintenant
+    // toujours disponible via un Arc<Mutex<Receiver>> partagé (voir doc du
+    // champ VsockCapturer::inputs_rx), donc cette branche n'a plus lieu d'être.
+    let inputs_task = {
+        let inputs_rx = Arc::clone(&inputs_rx);
         let shutdown_inputs = shutdown.clone();
         Some(tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = shutdown_inputs.cancelled() => break,
-                    maybe_batch = rx.recv() => {
-                        let Some(batch_bytes) = maybe_batch else { break; };
-                        // Envelopper le blob dans AgentMessage::Inputs et l'envoyer
-                        // sur le canal vsock. L'agent le décodera comme InputBatch v1
-                        // (JSON) et l'injectera via RemoteDesktop.
-                        let msg = AgentMessage {
-                            msg: Some(agent_message::Msg::Inputs(batch_bytes)),
-                        };
-                        if let Err(e) = send_framed(&mut writer_handle, &msg).await {
-                            warn!(error = %e, "erreur envoi InputBatch sur vsock — arrêt du relais");
-                            break;
-                        }
-                        debug!("InputBatch relayé sur vsock");
-                    }
-                }
-            }
-            Ok::<(), anyhow::Error>(())
+            run_inputs_relay(writer, inputs_rx, shutdown_inputs).await
         }))
-    } else {
-        writer.shutdown().await.ok();
-        None
     };
 
     // 6. Boucle principale : recevoir les frames et les passer à l'encodeur.
@@ -402,4 +405,187 @@ async fn recv_framed<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<AgentMes
     reader.read_exact(&mut payload).await.context("lecture payload")?;
     let msg = AgentMessage::decode(&payload[..]).context("décodage protobuf")?;
     Ok(msg)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Relais des inputs proxy → agent, factorisé pour être testable indépendamment
+// du transport vsock (fonction générique sur AsyncWrite).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Consomme les `InputBatch` (JSON) depuis `inputs_rx`, les enveloppe dans
+/// un `AgentMessage::Inputs` framed, et les écrit sur `writer` jusqu'à ce que :
+///   • `shutdown` soit cancellé,
+///   • ou le canal source soit fermé (aucun sender restant, cas de test),
+///   • ou une erreur d'écriture survienne.
+///
+/// La signature est volontairement générique pour permettre les tests avec
+/// `tokio::io::duplex` sans dépendre du kernel vsock.
+async fn run_inputs_relay<W: AsyncWriteExt + Unpin>(
+    mut writer: W,
+    inputs_rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    // On garde le MutexGuard pendant toute la durée de la session : c'est
+    // ce qui empêche deux sessions concurrentes de se voler mutuellement les
+    // batches. Comme le VsockCapturer est mono-session par VM, la contention
+    // est nulle : le lock est libre entre les sessions.
+    let mut rx_guard = inputs_rx.lock().await;
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            maybe_batch = rx_guard.recv() => {
+                let Some(batch_bytes) = maybe_batch else { break; };
+                // Envelopper le blob dans AgentMessage::Inputs et l'envoyer
+                // sur le canal vsock. L'agent le décodera comme InputBatch v1
+                // (JSON) et l'injectera via RemoteDesktop.
+                let msg = AgentMessage {
+                    msg: Some(agent_message::Msg::Inputs(batch_bytes)),
+                };
+                if let Err(e) = send_framed(&mut writer, &msg).await {
+                    warn!(error = %e, "erreur envoi InputBatch sur vsock — arrêt du relais");
+                    break;
+                }
+                debug!("InputBatch relayé sur vsock");
+            }
+        }
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests unitaires — non-régression du bug "sessions 2+ sans inputs".
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{duplex, AsyncReadExt};
+
+    /// Aide test : lit une AgentMessage framed depuis un reader `duplex`.
+    /// Duplique volontairement la logique de `recv_framed` (le vrai
+    /// `recv_framed` est déjà testé indirectement par les tests d'intégration
+    /// du crate) pour rester indépendant de sa signature.
+    async fn read_one_framed<R: AsyncReadExt + Unpin>(reader: &mut R) -> AgentMessage {
+        let mut len_buf = [0u8; 4];
+        reader.read_exact(&mut len_buf).await.expect("lecture longueur");
+        let len = u32::from_le_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; len];
+        reader.read_exact(&mut buf).await.expect("lecture payload");
+        AgentMessage::decode(&buf[..]).expect("décodage protobuf")
+    }
+
+    fn extract_input_bytes(msg: AgentMessage) -> Vec<u8> {
+        match msg.msg {
+            Some(agent_message::Msg::Inputs(bytes)) => bytes,
+            other => panic!("attendu AgentMessage::Inputs, reçu {:?}", other),
+        }
+    }
+
+    /// Régression : dans l'ancien design, la 2e session ne recevait plus
+    /// aucun input parce que `guard.take()` avait consommé le `Option<Receiver>`
+    /// à la 1re session et que rien ne le repopulait. Ce test simule deux
+    /// sessions consécutives sur le même `Arc<Mutex<Receiver>>` et vérifie
+    /// que chaque session voit bien passer son batch.
+    #[tokio::test]
+    async fn inputs_relay_survives_multiple_sessions() {
+        let (inputs_tx, inputs_rx) = mpsc::channel::<Vec<u8>>(8);
+        let inputs_rx = Arc::new(Mutex::new(inputs_rx));
+
+        // ── Session 1 ──────────────────────────────────────────────────
+        let (client_end_1, mut agent_end_1) = duplex(4096);
+        let shutdown_1 = CancellationToken::new();
+        let relay_1 = tokio::spawn(run_inputs_relay(
+            client_end_1,
+            Arc::clone(&inputs_rx),
+            shutdown_1.clone(),
+        ));
+
+        inputs_tx.send(b"batch-session-1".to_vec()).await.unwrap();
+        let received = read_one_framed(&mut agent_end_1).await;
+        assert_eq!(
+            extract_input_bytes(received),
+            b"batch-session-1",
+            "session 1 doit recevoir son batch"
+        );
+
+        // Fin de session 1 : on cancel, la task quitte, le MutexGuard est droppé.
+        shutdown_1.cancel();
+        relay_1.await.unwrap().expect("relay 1 doit se terminer proprement");
+
+        // ── Session 2 ──────────────────────────────────────────────────
+        // C'est ici que l'ancien code cassait : le receiver était `None`,
+        // `run_session` faisait `writer.shutdown()`, l'agent voyait EOF.
+        let (client_end_2, mut agent_end_2) = duplex(4096);
+        let shutdown_2 = CancellationToken::new();
+        let relay_2 = tokio::spawn(run_inputs_relay(
+            client_end_2,
+            Arc::clone(&inputs_rx),
+            shutdown_2.clone(),
+        ));
+
+        inputs_tx.send(b"batch-session-2".to_vec()).await.unwrap();
+        let received = read_one_framed(&mut agent_end_2).await;
+        assert_eq!(
+            extract_input_bytes(received),
+            b"batch-session-2",
+            "session 2 doit AUSSI recevoir son batch (régression du bug guard.take())"
+        );
+
+        shutdown_2.cancel();
+        relay_2.await.unwrap().expect("relay 2 doit se terminer proprement");
+    }
+
+    /// Vérifie qu'un `shutdown.cancel()` interrompt bien le relais et que
+    /// la task se termine sans erreur (utile pour garantir que la fin de
+    /// session libère le MutexGuard sans panique).
+    #[tokio::test]
+    async fn inputs_relay_terminates_on_shutdown() {
+        let (_inputs_tx, inputs_rx) = mpsc::channel::<Vec<u8>>(1);
+        let inputs_rx = Arc::new(Mutex::new(inputs_rx));
+
+        let (client_end, _agent_end) = duplex(1024);
+        let shutdown = CancellationToken::new();
+
+        let handle = tokio::spawn(run_inputs_relay(
+            client_end,
+            Arc::clone(&inputs_rx),
+            shutdown.clone(),
+        ));
+
+        // Rien envoyé sur inputs_tx : la task doit rester bloquée dans le
+        // select! jusqu'au cancel.
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("la task doit se terminer après cancel (pas de deadlock)")
+            .unwrap()
+            .expect("run_inputs_relay doit retourner Ok");
+    }
+
+    /// Vérifie que si un batch arrive pendant la session, il est relayé
+    /// tel quel (pas de troncature, pas de corruption du framing).
+    #[tokio::test]
+    async fn inputs_relay_preserves_batch_bytes() {
+        let (inputs_tx, inputs_rx) = mpsc::channel::<Vec<u8>>(4);
+        let inputs_rx = Arc::new(Mutex::new(inputs_rx));
+
+        let (client_end, mut agent_end) = duplex(8192);
+        let shutdown = CancellationToken::new();
+        let handle = tokio::spawn(run_inputs_relay(
+            client_end,
+            Arc::clone(&inputs_rx),
+            shutdown.clone(),
+        ));
+
+        // Un batch avec un contenu qui contient tous les octets 0..=255,
+        // pour détecter toute corruption d'encodage/framing.
+        let payload: Vec<u8> = (0u8..=255).collect();
+        inputs_tx.send(payload.clone()).await.unwrap();
+
+        let received = read_one_framed(&mut agent_end).await;
+        assert_eq!(extract_input_bytes(received), payload);
+
+        shutdown.cancel();
+        handle.await.unwrap().unwrap();
+    }
 }
