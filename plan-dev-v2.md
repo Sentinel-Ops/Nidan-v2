@@ -16,7 +16,7 @@ message décrivant l'intention (`feat:`, `docs:`, `chore:`).
 [Sentinel-Ops/Nidan](https://github.com/Sentinel-Ops/Nidan) au tag
 `v1.0-fonctionnelle`. La v2 démarre de cet état comme base.
 
-## Vue d'ensemble — 6 étapes
+## Vue d'ensemble — 7 étapes
 
 | # | Étape                                                 | Livrable                                            | Durée estimée   |
 | --- | ----------------------------------------------------- | --------------------------------------------------- | --------------- |
@@ -26,11 +26,15 @@ message décrivant l'intention (`feat:`, `docs:`, `chore:`).
 | 4 | Créer `nidan-agent` (allègement de `nidan-server` v1) | Binaire qui envoie pixels bruts sur vsock           | 1 jour          |
 | 5 | Intégration bout-en-bout                              | Chaîne complète client ↔ proxy ↔ vsock ↔ agent ↔ VM | 0.5 à 1 jour    |
 | 6 | Documentation Proxmox + robustesse + polissage        | Guide de déploiement + `.deb` + multi-session       | 1 à 2 jours     |
+| 7 | Migration Proxmox → KVM/libvirt + pool dynamique      | Trait `VmProvider`, `LibvirtProvider`, échelons C-G | 3 à 4 jours     |
 
 Estimation totale initiale : **4 à 5 jours de développement effectif**, hors
 allers-retours de validation en environnement réel. L'étape 6 s'est étendue
 au-delà de l'estimation initiale suite à la découverte et correction d'un
-bug de fond dans le pipeline d'encodage (voir détail plus bas).
+bug de fond dans le pipeline d'encodage (voir détail plus bas). L'étape 7
+a été ajoutée après la décision d'abandonner Proxmox au profit d'une stack
+KVM/libvirt pure (voir `docs/plan-action-migration-kvm.md` pour la décision
+d'architecture détaillée).
 
 ---
 
@@ -475,6 +479,150 @@ redémarrage du proxy → inputs fonctionnels, plus aucun WARN
 
 ---
 
+## Étape 7 — Migration Proxmox → KVM/libvirt + reprise pool dynamique
+
+### Contexte du pivot
+
+L'infrastructure de développement bascule d'une stack Proxmox vers du
+KVM/libvirt pur, hébergée sur un serveur Dell R440. Décision prise après
+la session de développement du 16-17 juillet 2026 sur le pool dynamique
+Proxmox (échelons A+B validés) et le constat en usage que Proxmox impose
+plusieurs limitations structurelles pour l'usage NIDAN :
+
+- Attribut `args` réservé root → CID vsock non modifiable par API →
+  contrainte mono-session par hôte
+- Couche d'abstraction Proxmox (pveproxy, pvedaemon, storage plugins)
+  qui augmente la surface d'attaque pour la CSPN
+- API HTTP à sécuriser (mTLS, épinglage cert) vs socket Unix local
+  libvirt = surface de sécurité plus large
+- Dépendance à un produit tiers qui affaiblit le narratif souveraineté
+
+Le passage à libvirt lève ces trois contraintes simultanément : le CID
+vsock devient un élément du XML de domaine entièrement contrôlé par le
+broker, le multi-session dynamique redevient possible sur un seul hôte,
+et le TOE CSPN se resserre autour de composants souverains bien connus.
+
+### Décision d'architecture — ni fork, ni nouveau repo
+
+Le repo `Sentinel-Ops/Nidan-v2` est conservé unique. Introduction d'un
+**trait `VmProvider`** qui découple le broker de l'hyperviseur, avec deux
+implémentations :
+
+- `LibvirtProvider` — nouvelle implémentation cible (crate `virt`, socket
+  Unix local `qemu:///system`)
+- `ProxmoxProvider` — code existant conservé derrière un feature flag
+  Cargo `proxmox-provider`, non compilé par défaut, hors périmètre CSPN,
+  réactivable si un cas d'usage commercial le demande
+
+Justification complète dans `docs/plan-action-migration-kvm.md`.
+
+### Découpage en 5 phases
+
+**Phase 0 — Sanctuarisation Git (fait)**
+
+- Tag `v0.7.1-etape6i-multisession-inputs` sur `main`
+- Merge de `feat-pool-dynamique-echelon-A` (échelon B finalisé, test
+  d'intégration retiré pour éviter les secrets en dur)
+- Tag `v0.7.1-proxmox-final` : point de restauration permanent pour la
+  version Proxmox fonctionnelle
+- Commit du document `docs/plan-action-migration-kvm.md`
+
+**Phase 1 — v0.7.2 : fix session portail unique (en cours)**
+
+À faire **avant** la divergence libvirt car indépendant de l'hyperviseur.
+Deux fixes qui doivent rester dans le tronc commun :
+
+1. Nouveau module `nidan-agent/src/portal_session.rs` : négociation
+   portail XDG unique (RemoteDesktop + ScreenCast couplés sur UNE
+   session D-Bus). Corrige le bug `notify_pointer_motion_absolute` qui
+   échouait à cause de deux sessions D-Bus séparées créant des
+   `stream_node` non valides. Effet observé avant fix : curseur figé,
+   clic droit et clavier fonctionnels (position-indépendants), clic
+   gauche apparemment inactif (en réalité injecté à la position figée
+   du curseur invité).
+2. Clamp openh264 dimensions paires dans `nidan-proxy-encoder` :
+   robustesse à toute résolution capture. Bug révélé par le passage
+   virtio-gpu à 821×536 (panic `width needs to be multiple of 2`).
+   À corriger défensivement quel que soit le driver graphique.
+
+Bonus : une seule popup GNOME d'autorisation, un seul token de
+restauration à gérer, surface D-Bus réduite (argument CSPN).
+
+Tag cible : `v0.7.2-etape6j-portal-unifie`.
+
+**Phase 2 — Trait `VmProvider` (0.5 jour)**
+
+Branche `feat-libvirt-provider` depuis `main`.
+
+- Extraction du trait depuis la signature de fait de `ProxmoxClient`
+  (7 méthodes : clone_vm, start_vm, stop_vm, delete_vm, set_config,
+  get_vm_status, list_vms — `wait_for_task` supprimé côté trait car
+  libvirt est synchrone)
+- Déplacement du code Proxmox derrière `#[cfg(feature = "proxmox-provider")]`
+- Le broker consomme `Box<dyn VmProvider>` sélectionné via config TOML
+
+**Phase 3 — `LibvirtProvider` : équivalent échelons A+B (1 jour)**
+
+- Implémentation avec le crate `virt` sur `qemu:///system`
+- Clone par backing file qcow2 (`qemu-img create -b`) + génération XML
+  de domaine avec CID vsock unique par VM (`cid=200+offset`)
+- Template : recréer l'équivalent de la VM template 116 côté libvirt
+  (qcow2 de base + XML template avec placeholder CID). Les tokens de
+  portail persistés dans l'image restent valables (indépendants de
+  l'hyperviseur)
+- Validation : cycle complet clone → start → get_status → stop → delete,
+  équivalent à la validation Proxmox du 16-17 juillet (133 s en Proxmox ;
+  attendu significativement plus rapide avec backing files libvirt)
+
+**Phase 4 — Reprise des échelons C-G sur le trait (planning inchangé)**
+
+Reprise exacte de la roadmap prévue en session du 16-17 juillet, mais
+écrite contre le trait (donc valable pour tout provider futur) :
+
+- **Échelon C** — Allocation VMID (plage 200-299) + intégration dans
+  `VmPool::assign()` : provisionnement automatique quand aucune VM
+  statique disponible
+- **Échelon D** — Destruction automatique post-session dans
+  `VmPool::release()`
+- **Échelon E** — Pool chaud (`min_available` de `PoolConfig`, déjà
+  présent, inutilisé) — **désormais multi-VM possible** grâce aux CIDs
+  dynamiques
+- **Échelons F-G** — GC des VMs orphelines, quotas, nettoyage au
+  démarrage du broker
+
+### Livrables
+
+- `nidan-agent/src/portal_session.rs` (module session portail unifié)
+- `nidan-broker/src/provider/mod.rs` (trait `VmProvider`)
+- `nidan-broker/src/provider/libvirt.rs` (implémentation cible)
+- `nidan-broker/src/provider/proxmox.rs` (renommé depuis
+  `nidan-broker/src/proxmox/mod.rs`, feature-gated)
+- `docs/plan-action-migration-kvm.md` (déjà en place)
+
+### Critère de validation
+
+Cycle complet identique à la validation du 16-17 juillet, mais côté
+libvirt : provisionnement dynamique d'une VM du pool, session cliente
+end-to-end avec inputs, destruction propre post-session. Multi-session
+simultanée validée (nouveauté rendue possible par la migration).
+
+### Commit types
+
+```
+docs: plan d'action migration Proxmox → KVM/libvirt
+fix(agent): session portail XDG unique (RemoteDesktop + ScreenCast)
+fix(proxy-encoder): clamp openh264 dimensions paires
+refactor(broker): extraction trait VmProvider
+feat(broker): LibvirtProvider (échelons A+B, cible primaire)
+chore(broker): feature-gate ProxmoxProvider (proxmox-provider)
+feat(broker): pool dynamique échelon C — allocation VMID
+feat(broker): pool dynamique échelon D — release + destruction
+feat(broker): pool dynamique échelon E — pool chaud multi-VM
+feat(broker): pool dynamique échelons F/G — GC + quotas
+```
+
+---
+
 ## Contraintes de mon environnement de travail
 
 Il faut que ce soit dit clairement pour éviter les malentendus :
@@ -607,12 +755,36 @@ reconnexion agent → inputs fonctionnels, plus aucun WARN
 `lecture longueur` côté agent.
 Preuve : [tag v0.7.1-etape6i-multisession-inputs](https://github.com/Sentinel-Ops/Nidan-v2/releases/tag/v0.7.1-etape6i-multisession-inputs)
 
-- **Prochaine action** : blocs 3 (packages `.deb`) et 5 (VM jetable
-avec snapshot restauré, mode Sanzu original) — reportés en v2.1/v3,
-non bloquants pour un usage courant. Éventuellement : article MISC
-Magazine sur la sécurité VoWiFi (en cours, indépendant de NIDAN),
-poursuite de la préparation aux entretiens sécurité défense/spatial.
+- **Étape 7, session du 16-17 juillet 2026 (fait)** : échelons A+B du
+  pool dynamique Proxmox complétés. `ProxmoxClient` implémente
+  l'authentification par token API avec épinglage TLS SHA-256
+  (échelon A : lecture — `get_vm_status`, `list_vms`) et les
+  opérations d'écriture (échelon B : `clone_vm`, `set_config`,
+  `start_vm`, `stop_vm`, `delete_vm` + `wait_for_task` pour les
+  tâches async UPID). Validation cycle complet clone → start → stop
+  → delete en 133 s (VM 201 depuis template 116).
 
-## Footer
+- **Étape 7, Phase 0 — Sanctuarisation Git (fait, 24 août 2026)** :
+  merge de `feat-pool-dynamique-echelon-A` dans `main`, tag
+  `v0.7.1-proxmox-final` posé comme point de restauration permanent
+  de la version Proxmox fonctionnelle. Décision d'architecture
+  documentée dans `docs/plan-action-migration-kvm.md` : conservation
+  du repo unique, introduction d'un trait `VmProvider` avec
+  `LibvirtProvider` comme cible primaire et `ProxmoxProvider`
+  conservé derrière un feature flag Cargo `proxmox-provider`.
+  Contexte du pivot : abandon de Proxmox au profit d'une stack
+  KVM/libvirt pure sur Dell R440, avec bénéfice attendu de levée de
+  la contrainte mono-session (CIDs vsock dynamiquement contrôlables
+  par le broker).
 
-[https://github.com](https://github.com) © 2026 GitHub, Inc.
+- **Prochaine action** : Phase 1 de l'étape 7 (v0.7.2 fix session
+  portail XDG unique + clamp openh264 dimensions paires). Puis
+  Phases 2 (extraction trait `VmProvider`) et 3 (implémentation
+  `LibvirtProvider`) sur la branche `feat-libvirt-provider`, puis
+  reprise des échelons C-G du pool dynamique sur le trait.
+
+  En parallèle, non bloquants : blocs 3 (packages `.deb`) et 5 (VM
+  jetable avec snapshot restauré, mode Sanzu original) — reportés en
+  v2.1/v3. Article MISC Magazine sur la sécurité VoWiFi (en cours,
+  indépendant de NIDAN), poursuite de la préparation aux entretiens
+  sécurité défense/spatial.
