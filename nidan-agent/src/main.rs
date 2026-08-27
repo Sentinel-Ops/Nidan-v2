@@ -29,6 +29,8 @@ mod config;
 mod input;
 #[cfg(feature = "remotedesktop-input")]
 mod remote_desktop;
+#[cfg(all(feature = "pipewire-capture", feature = "remotedesktop-input"))]
+mod portal_session;
 mod vsock_link;
 
 use config::AgentConfig;
@@ -54,8 +56,56 @@ async fn main() -> anyhow::Result<()> {
     // Arc<dyn Capturer>. On garde exactement le même pattern pour compat.
     // Signature v1 : create_capturer(backend, display_number, use_xshm, use_xdamage, restore_token).
     // Pour l'agent : display_number = 0, pas d'optim X11 (sur Wayland), pas de token de restauration.
-    let capturer = capture::create_capturer(&cfg.capture.backend, 0, false, false, None)
-        .with_context(|| format!("initialisation capturer '{}'", cfg.capture.backend))?;
+    // ─── Négociation portail unifiée ───────────────────────────────────
+    // Une seule session RemoteDesktop + ScreenCast couplés, partagée
+    // entre le capturer et l'injecteur. Corrige le bug historique où
+    // deux sessions séparées produisaient des stream_node incompatibles.
+    #[cfg(all(feature = "pipewire-capture", feature = "remotedesktop-input"))]
+    let (capturer, shared_inputs_tx, shared_width, shared_height) =
+        if cfg.capture.backend == "wayland" || cfg.capture.backend == "pipewire" {
+            let saved_token = portal_session::load_token();
+            let handles = portal_session::spawn_shared_portal(saved_token)
+                .context("négociation portail unifiée")?;
+
+            // Persister le nouveau token si régénéré.
+            if let Some(ref token) = handles.restore_token {
+                portal_session::save_token(token);
+            }
+
+            let width = handles.stream.width;
+            let height = handles.stream.height;
+            let cap: std::sync::Arc<dyn capture::Capturer> = std::sync::Arc::new(
+                capture::pipewire::PipeWireCapturer::from_shared_stream(handles.stream)?,
+            );
+
+            (cap, Some(handles.inputs_tx), width, height)
+        } else {
+            // Backend non-Wayland : capturer classique, pas de canal partagé.
+            // Fix E0505 : extraire w/h dans des statements séparés libère
+            // l'emprunt de cap avant de le move dans le tuple.
+            let cap = capture::create_capturer(&cfg.capture.backend, 0, false, false, None)
+                .with_context(|| format!("initialisation capturer '{}'", cfg.capture.backend))?;
+            let w = cap.capabilities().width;
+            let h = cap.capabilities().height;
+            (cap, None, w, h)
+        };
+
+    // Chemin dégradé (sans les deux features conjointes) — mêmes types pour
+    // que le reste du main compile identique. #[allow(unused_variables)]
+    // parce que shared_inputs_tx / shared_width / shared_height ne sont
+    // consommés qu'à travers #[cfg(feature = "remotedesktop-input")]
+    // (donc unused si cette feature est absente, ex. mode stub par défaut).
+    #[cfg(not(all(feature = "pipewire-capture", feature = "remotedesktop-input")))]
+    #[allow(unused_variables)]
+    let (capturer, shared_inputs_tx, shared_width, shared_height) = {
+        let cap = capture::create_capturer(&cfg.capture.backend, 0, false, false, None)
+            .with_context(|| format!("initialisation capturer '{}'", cfg.capture.backend))?;
+        let w = cap.capabilities().width;
+        let h = cap.capabilities().height;
+        let inputs_tx: Option<std::sync::mpsc::Sender<nidan_proto::InputBatch>> = None;
+        (cap, inputs_tx, w, h)
+    };
+
     let caps = capturer.capabilities();
     info!(
         backend = %cfg.capture.backend,
@@ -74,17 +124,42 @@ async fn main() -> anyhow::Result<()> {
     };
     let supported_formats = native_first;
 
-    // 4. Handshake vsock avec le proxy.
-    let (stream, start) = vsock_link::connect_and_handshake(
-        cfg.vsock.host_cid,
-        cfg.vsock.port,
-        supported_formats,
-        caps.width,
-        caps.height,
-        cfg.capture.max_fps,
-    )
-    .await
-    .context("handshake vsock avec le proxy")?;
+    // 4. Handshake vsock avec le proxy (retry avec backoff exponentiel).
+    //    L'agent peut démarrer avant le proxy-encoder (ex. boot de la VM
+    //    avant que le broker ait alloué une session, ou proxy-encoder
+    //    redémarré). Au lieu de mourir sur ECONNRESET et laisser systemd
+    //    relancer le process toutes les 2 secondes, on attend patiemment
+    //    que le proxy soit prêt. Le backoff plafonne à 30 s pour ne pas
+    //    rester muet trop longtemps dans les logs.
+    let (stream, start) = {
+        let mut delay = std::time::Duration::from_secs(2);
+        let max_delay = std::time::Duration::from_secs(30);
+        loop {
+            match vsock_link::connect_and_handshake(
+                cfg.vsock.host_cid,
+                cfg.vsock.port,
+                supported_formats.clone(), // clone car consommé par la fonction
+                caps.width,
+                caps.height,
+                cfg.capture.max_fps,
+            )
+            .await
+            {
+                Ok(result) => break result,
+                Err(e) => {
+                     tracing::warn!(
+                        error = %e,
+                        retry_in_secs = delay.as_secs(),
+                        host_cid = cfg.vsock.host_cid,
+                        port = cfg.vsock.port,
+                        "connexion vsock échouée — retry avec backoff"
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(max_delay);
+                }
+            }
+        }
+    };
 
     // 5. Format négocié par le proxy (depuis StartCapture).
     // Si le proxy demande un format qu'on ne peut pas fournir, on renvoie
@@ -123,17 +198,30 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "remotedesktop-input")]
     let injector = {
         if cfg.input.backend == "remotedesktop" {
-            match crate::remote_desktop::RemoteDesktopInjector::new(
-                start.target_width,
-                start.target_height,
-                None, // pas de restore_token pour l'instant
-            ) {
-                Ok(inj) => {
-                    info!("injecteur RemoteDesktop initialisé");
-                    Some(std::sync::Arc::new(tokio::sync::Mutex::new(inj)))
+            // Nouveau flow : on branche l'injecteur sur le canal du thread
+            // portail partagé (voir portal_session). Si pas de canal partagé
+            // (backend non-Wayland), on log un warn et on continue sans.
+            match shared_inputs_tx {
+                Some(inputs_tx) => {
+                    match crate::remote_desktop::RemoteDesktopInjector::from_shared_channel(
+                        inputs_tx,
+                        shared_width,
+                        shared_height,
+                    ) {
+                        Ok(inj) => {
+                            info!("injecteur RemoteDesktop branché sur session partagée");
+                            Some(std::sync::Arc::new(tokio::sync::Mutex::new(inj)))
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "injecteur RemoteDesktop non initialisable");
+                            None
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "injecteur RemoteDesktop non initialisable — inputs ignorés");
+                None => {
+                    tracing::warn!(
+                        "injecteur RemoteDesktop demandé mais pas de session portail active — inputs ignorés"
+                    );
                     None
                 }
             }
