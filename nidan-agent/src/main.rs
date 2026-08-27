@@ -124,17 +124,42 @@ async fn main() -> anyhow::Result<()> {
     };
     let supported_formats = native_first;
 
-    // 4. Handshake vsock avec le proxy.
-    let (stream, start) = vsock_link::connect_and_handshake(
-        cfg.vsock.host_cid,
-        cfg.vsock.port,
-        supported_formats,
-        caps.width,
-        caps.height,
-        cfg.capture.max_fps,
-    )
-    .await
-    .context("handshake vsock avec le proxy")?;
+    // 4. Handshake vsock avec le proxy (retry avec backoff exponentiel).
+    //    L'agent peut démarrer avant le proxy-encoder (ex. boot de la VM
+    //    avant que le broker ait alloué une session, ou proxy-encoder
+    //    redémarré). Au lieu de mourir sur ECONNRESET et laisser systemd
+    //    relancer le process toutes les 2 secondes, on attend patiemment
+    //    que le proxy soit prêt. Le backoff plafonne à 30 s pour ne pas
+    //    rester muet trop longtemps dans les logs.
+    let (stream, start) = {
+        let mut delay = std::time::Duration::from_secs(2);
+        let max_delay = std::time::Duration::from_secs(30);
+        loop {
+            match vsock_link::connect_and_handshake(
+                cfg.vsock.host_cid,
+                cfg.vsock.port,
+                supported_formats.clone(), // clone car consommé par la fonction
+                caps.width,
+                caps.height,
+                cfg.capture.max_fps,
+            )
+            .await
+            {
+                Ok(result) => break result,
+                Err(e) => {
+                     tracing::warn!(
+                        error = %e,
+                        retry_in_secs = delay.as_secs(),
+                        host_cid = cfg.vsock.host_cid,
+                        port = cfg.vsock.port,
+                        "connexion vsock échouée — retry avec backoff"
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(max_delay);
+                }
+            }
+        }
+    };
 
     // 5. Format négocié par le proxy (depuis StartCapture).
     // Si le proxy demande un format qu'on ne peut pas fournir, on renvoie
