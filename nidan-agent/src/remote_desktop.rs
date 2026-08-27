@@ -66,6 +66,37 @@ impl RemoteDesktopInjector {
         Ok(Self { tx, width, height, injected: 0, _thread: thread })
     }
 
+    /// Construit l'injecteur à partir d'un canal d'inputs déjà branché
+    /// sur un thread portail partagé (voir `crate::portal_session`).
+    ///
+    /// Contrairement à `new()`, ne négocie AUCUNE session portail — la
+    /// négociation a déjà été faite par `portal_session::spawn_shared_portal`.
+    /// L'injecteur devient un simple wrapper autour du canal `inputs_tx`.
+    #[cfg(feature = "pipewire-capture")]
+    pub fn from_shared_channel(
+        inputs_tx: std::sync::mpsc::Sender<InputBatch>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
+        // Thread bidon (ne fait rien) juste pour satisfaire le champ
+        // `_thread: JoinHandle<()>`. Le vrai thread d'injection est celui
+        // de portal_session — il est propriétaire de la session portail.
+        let thread = std::thread::Builder::new()
+            .name("nidan-remotedesktop-shared".into())
+            .spawn(|| { /* no-op : le thread portail vit dans portal_session */ })
+            .context("thread bidon RemoteDesktop (shared session)")?;
+
+        info!(width, height, "injecteur RemoteDesktop initialisé (session partagée)");
+
+        Ok(Self {
+            tx: inputs_tx,
+            width,
+            height,
+            injected: 0,
+            _thread: thread,
+        })
+    }
+
     /// Injecte tous les événements d'un batch (envoi au thread portail).
     pub fn inject_batch(&mut self, batch: &InputBatch) -> Result<()> {
         self.injected += batch.events.len() as u64;
@@ -323,7 +354,7 @@ fn write_token(path: &std::path::Path, token: &str) {
 /// un code tombant sur une touche système (alimentation, veille…) qui pourrait
 /// arrêter ou redémarrer la machine.
 #[cfg(feature = "remotedesktop-input")]
-fn sdl_scancode_to_evdev(sdl_scancode: u32) -> Option<i32> {
+pub(crate) fn sdl_scancode_to_evdev(sdl_scancode: u32) -> Option<i32> {
     // SDL_SCANCODE_* (HID) → KEY_* (evdev)
     let code: i32 = match sdl_scancode {
         // Lettres A–Z : HID 4..29 → evdev (table explicite, AZERTY/QWERTY gérés

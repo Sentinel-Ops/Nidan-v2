@@ -73,6 +73,34 @@ impl PipeWireCapturer {
             seq: AtomicU64::new(0),
         })
     }
+
+    /// Construit un capturer à partir d'un `PortalStream` déjà négocié
+    /// par `crate::portal_session::spawn_shared_portal`.
+    ///
+    /// Contrairement à `new()`, ne fait AUCUN appel portail — consomme
+    /// directement le stream fourni.
+    #[cfg(feature = "remotedesktop-input")]
+    pub fn from_shared_stream(stream: PortalStream) -> Result<Self> {
+        let caps = CapturerCapabilities {
+            width: stream.width,
+            height: stream.height,
+            supports_xshm: false,
+            supports_xdamage: false,
+            pixel_format: PixelFormat::Bgra8888,
+        };
+        info!(
+            node = stream.node_id,
+            width = stream.width,
+            height = stream.height,
+            "capture PipeWire initialisée depuis session portail partagée"
+        );
+        Ok(Self {
+            caps,
+            node_id: stream.node_id,
+            fd: std::sync::Mutex::new(Some(stream.fd)),
+            seq: AtomicU64::new(0),
+        })
+    }
 }
 
 impl Capturer for PipeWireCapturer {
