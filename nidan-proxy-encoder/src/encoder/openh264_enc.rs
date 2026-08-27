@@ -30,20 +30,45 @@ impl Openh264Encoder {
     pub fn new(params: &EncoderParams) -> Result<Self> {
         params.validate().context("paramètres encodeur invalides")?;
 
+        // Clamp aux dimensions paires — contrainte YUV 4:2:0 du codec H.264.
+        // Sans ce clamp, une largeur ou hauteur impaire (ex. fenêtre virtio-gpu
+        // à 821×536 suite à un redimensionnement de console) déclenche un panic
+        // openh264 : `assertion left == right failed: width needs to be
+        // multiple of 2`. La perte au pire d'un pixel par dimension est
+        // imperceptible et bien préférable à un crash du proxy-encoder.
+        let width = params.width & !1u32;
+        let height = params.height & !1u32;
+        if width == 0 || height == 0 {
+            anyhow::bail!(
+                "dimensions encodeur invalides après clamp: {width}x{height} \
+                 (entrée: {}x{})",
+                params.width, params.height
+            );
+        }
+        if width != params.width || height != params.height {
+            warn!(
+                original_width = params.width,
+                original_height = params.height,
+                clamped_width = width,
+                clamped_height = height,
+                "dimensions clampées au multiple de 2 (contrainte H.264)"
+            );
+        }
+
         #[cfg(feature = "openh264")]
         {
             let encoder = Encoder::new()
                 .context("création encodeur openh264")?;
             info!(
-                width = params.width,
-                height = params.height,
+                width,
+                height,
                 fps = params.fps,
                 "encodeur H.264 openh264 initialisé"
             );
             Ok(Self {
                 encoder,
-                width: params.width,
-                height: params.height,
+                width,
+                height,
                 frame_count: 0,
                 force_keyframe: true,
                 keyframe_interval: (params.fps as u64 * params.keyframe_interval_secs as u64).max(1),
@@ -54,8 +79,8 @@ impl Openh264Encoder {
         {
             warn!("Openh264Encoder appelé sans la feature openh264 — utilisez le stub");
             Ok(Self {
-                width: params.width,
-                height: params.height,
+                width,
+                height,
                 frame_count: 0,
                 force_keyframe: true,
                 keyframe_interval: 60,
