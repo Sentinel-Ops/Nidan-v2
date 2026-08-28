@@ -23,7 +23,7 @@ capture_queue_depth = 4
 
 [video]
 codec = "h264"
-max_fps = 20
+max_fps = 30  # était 20
 target_bitrate_kbps = 0
 pixel_format = "yuv420p"
 hardware_accel = false

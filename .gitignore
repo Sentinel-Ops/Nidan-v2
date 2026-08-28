@@ -10,3 +10,4 @@ nidan.toml
 /sessions/
 Cargo.lock.bak
 *.bak
+.nidan-check-backups/

@@ -52,7 +52,7 @@ impl EncoderParams {
             preset: "ultrafast".to_string(), // Priorité latence
             hardware_accel: true,
             hw_device: None,
-            keyframe_interval_secs: 2,
+            keyframe_interval_secs: 1,  // réduit pour remote desktop (était 2)
             threads: 0,
         }
     }

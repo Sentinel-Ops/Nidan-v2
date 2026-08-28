@@ -86,9 +86,16 @@ fn run_sdl2_real(
         .map_err(|e| anyhow::anyhow!("SDL2 event pump: {}", e))?;
 
     let scaling = ScalingMode::from_str(&config.scaling);
-    let mut win_w = initial_width;
-    let mut win_h = initial_height;
-    let mut render_rect = RenderRect::compute(initial_width, initial_height, win_w, win_h, scaling);
+
+    // FIX: recalcul avec la taille réelle de la fenêtre (WM, HiDPI)
+    let (real_w, real_h) = canvas.output_size()
+        .unwrap_or((initial_width, initial_height));
+    let mut win_w = real_w;
+    let mut win_h = real_h;
+    // Résolution courante du stream (peut changer si la VM resize)
+    let mut stream_w = initial_width;
+    let mut stream_h = initial_height;
+    let mut render_rect = RenderRect::compute(stream_w, stream_h, win_w, win_h, scaling);
 
     let mut metrics = RenderMetrics {
         connection_status: ConnectionStatus::Connecting,
@@ -119,7 +126,7 @@ fn run_sdl2_real(
                 Event::Window { win_event: sdl2::event::WindowEvent::Resized(w, h), .. } => {
                     win_w = w as u32;
                     win_h = h as u32;
-                    render_rect = RenderRect::compute(initial_width, initial_height, win_w, win_h, scaling);
+                    render_rect = RenderRect::compute(stream_w, stream_h, win_w, win_h, scaling);
                     debug!(win_w, win_h, "fenêtre redimensionnée");
                 }
 
@@ -197,10 +204,15 @@ fn run_sdl2_real(
             let w = frame.width;
             let h = frame.height;
 
-            // Recréer la texture si la résolution a changé
-            if w != initial_width || h != initial_height {
-                // TODO : recréer texture avec nouvelles dims
-                debug!(w, h, "changement de résolution");
+            // Recréer la texture si la résolution du stream a changé
+            if w != stream_w || h != stream_h {
+                texture = texture_creator
+                    .create_texture_streaming(PixelFormatEnum::ABGR8888, w, h)
+                    .context("recréation texture après changement résolution")?;
+                stream_w = w;
+                stream_h = h;
+                render_rect = RenderRect::compute(stream_w, stream_h, win_w, win_h, scaling);
+                info!(stream_w, stream_h, "texture recréée pour nouvelle résolution");
             }
 
             texture.with_lock(None, |buf, pitch| {

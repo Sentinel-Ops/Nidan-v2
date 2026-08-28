@@ -143,7 +143,7 @@ pub fn start_renderer(
     tokio::sync::watch::Receiver<RenderMetrics>, // métriques
     std::thread::JoinHandle<Result<()>>,
 )> {
-    let (frame_tx, frame_rx) = mpsc::sync_channel::<DecodedFrame>(4);
+    let (frame_tx, frame_rx) = mpsc::sync_channel::<DecodedFrame>(1);
     let (input_tx, input_rx) = tokio_mpsc::channel::<InputEvent>(256);
     let (metrics_tx, metrics_rx) = tokio::sync::watch::channel(RenderMetrics::default());
 

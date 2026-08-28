@@ -114,7 +114,7 @@ impl DecoderPipeline {
             let mut frames_decoded = 0u64;
             let mut frames_dropped = 0u64;
 
-            info!(hw = self.hardware_decode, "décodeur démarré");
+            info!(hw_requested = self.hardware_decode, "décodeur démarré (backend réel loggé après init)");
 
             loop {
                 if shutdown.is_cancelled() {
