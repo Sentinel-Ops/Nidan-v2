@@ -340,8 +340,9 @@ impl AuthEngine {
         identity: &AuthIdentity,
         session_id: &str,
         vm_id: &str,
+        cid: Option<u32>,
     ) -> Result<String> {
-        self.jwt_engine.sign(identity, session_id, vm_id)
+        self.jwt_engine.sign(identity, session_id, vm_id, cid)
     }
 
     /// Valide un session token (utilisé par le serveur pour vérifier le client)

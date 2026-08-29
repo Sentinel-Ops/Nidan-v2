@@ -24,7 +24,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::{extract::State, routing::get, Router};
 use prometheus::{
-    Counter, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge,
+    Histogram, HistogramOpts, IntCounter, IntGauge,
     Registry, TextEncoder,
 };
 use tracing::info;

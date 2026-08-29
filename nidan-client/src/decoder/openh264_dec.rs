@@ -3,8 +3,8 @@
 //! Miroir de l'encodeur serveur : transforme un flux H.264 Annex B
 //! en frames BGRA prêtes pour le rendu. Pas de dépendance système.
 
-use anyhow::{Context, Result};
-use tracing::{debug, info};
+use anyhow::Result;
+use tracing::debug;
 
 use super::DecoderCodec;
 

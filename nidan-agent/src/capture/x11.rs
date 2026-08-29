@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::{Capturer, CapturerCapabilities, PixelFormat, RawFrame};
 

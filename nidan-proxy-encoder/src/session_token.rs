@@ -23,6 +23,9 @@ pub struct SessionClaims {
     pub groups: Vec<String>,
     #[serde(default)]
     pub realm: Option<String>,
+    /// CID vsock de la VM assignée (pour le routage multi-VM)
+    #[serde(default)]
+    pub cid: Option<u32>,
 }
 
 /// Vérifie un jeton de session JWT avec le secret partagé.

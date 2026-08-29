@@ -4,7 +4,6 @@
 //! Utilise une fenêtre glissante de 5 minutes.
 
 use std::net::IpAddr;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;

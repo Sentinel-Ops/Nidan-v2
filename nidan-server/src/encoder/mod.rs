@@ -21,14 +21,13 @@
 //! [VideoFrame proto → channel de sortie]
 //! ```
 
-use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use nidan_common::crypto::{SessionKey, StreamCipher};
-use nidan_proto::{VideoCodec, VideoFrame};
+use nidan_proto::VideoFrame;
 
 use crate::capture::RawFrame;
 

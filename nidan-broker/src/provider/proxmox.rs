@@ -482,6 +482,113 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+
+// ── Implémentation du trait VmProvider ──────────────────────────────────────
+
+use super::{ProviderVm, ProviderVmStatus, VmProvider};
+use async_trait::async_trait;
+
+#[async_trait]
+impl VmProvider for ProxmoxClient {
+    fn backend_name(&self) -> &'static str {
+        "proxmox"
+    }
+
+    async fn list_vms(&self) -> Result<Vec<ProviderVm>> {
+        let summaries = ProxmoxClient::list_vms(self).await?;
+        Ok(summaries
+            .into_iter()
+            .map(|s| ProviderVm {
+                provider_id: s.vmid.to_string(),
+                name: s.name,
+                status: match s.status.as_str() {
+                    "running" => ProviderVmStatus::Running,
+                    "stopped" => ProviderVmStatus::Stopped,
+                    other => ProviderVmStatus::Unknown(other.to_string()),
+                },
+            })
+            .collect())
+    }
+
+    async fn get_status(&self, provider_id: &str) -> Result<ProviderVm> {
+        let vmid: u32 = provider_id
+            .parse()
+            .context("provider_id doit être un VMID numérique pour Proxmox")?;
+        let s = self.get_vm_status(vmid).await?;
+        Ok(ProviderVm {
+            provider_id: s.vmid.to_string(),
+            name: s.name,
+            status: match s.status.as_str() {
+                "running" => ProviderVmStatus::Running,
+                "stopped" => ProviderVmStatus::Stopped,
+                other => ProviderVmStatus::Unknown(other.to_string()),
+            },
+        })
+    }
+
+    async fn clone_vm(
+        &self,
+        template_id: &str,
+        new_name: &str,
+    ) -> Result<ProviderVm> {
+        let template_vmid: u32 = template_id
+            .parse()
+            .context("template_id Proxmox doit être numérique")?;
+        // Allocation simplifiée du VMID — sera raffinée en Phase 4
+        // quand le pool dynamique aura un allocateur de VMID dédié.
+        let new_vmid = template_vmid + 100;
+        let upid =
+            ProxmoxClient::clone_vm(self, template_vmid, new_vmid, new_name)
+                .await?;
+        self.wait_for_task(
+            &upid,
+            std::time::Duration::from_secs(120),
+            500,
+        )
+        .await?;
+        self.get_status(&new_vmid.to_string()).await
+    }
+
+    async fn start_vm(&self, provider_id: &str) -> Result<()> {
+        let vmid: u32 = provider_id.parse().context("VMID invalide")?;
+        let upid = ProxmoxClient::start_vm(self, vmid).await?;
+        self.wait_for_task(
+            &upid,
+            std::time::Duration::from_secs(60),
+            500,
+        )
+        .await
+    }
+
+    async fn stop_vm(&self, provider_id: &str) -> Result<()> {
+        let vmid: u32 = provider_id.parse().context("VMID invalide")?;
+        let upid = ProxmoxClient::stop_vm(self, vmid).await?;
+        self.wait_for_task(
+            &upid,
+            std::time::Duration::from_secs(60),
+            500,
+        )
+        .await
+    }
+
+    async fn delete_vm(&self, provider_id: &str) -> Result<()> {
+        let vmid: u32 = provider_id.parse().context("VMID invalide")?;
+        let upid = ProxmoxClient::delete_vm(self, vmid).await?;
+        self.wait_for_task(
+            &upid,
+            std::time::Duration::from_secs(60),
+            500,
+        )
+        .await
+    }
+
+    async fn set_vsock_cid(&self, provider_id: &str, cid: u32) -> Result<()> {
+        let vmid: u32 = provider_id.parse().context("VMID invalide")?;
+        let args = format!("-device vhost-vsock-pci,guest-cid={cid}");
+        self.set_config(vmid, "args", &args).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

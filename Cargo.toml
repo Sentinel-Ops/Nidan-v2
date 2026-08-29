@@ -10,6 +10,7 @@ members = [
     "encode-test",
     "nidan-proxy-encoder",
     "nidan-agent",
+    "nidan-host-agent",
 ]
 resolver = "2"
 

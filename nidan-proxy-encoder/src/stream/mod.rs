@@ -27,13 +27,12 @@ use tracing::{error, info, warn};
 
 use nidan_common::session::SessionId;
 use nidan_proto::{
-    ClientServerHandshake, ServerHandshakeAck, SessionState, VideoFrame,
+    ClientServerHandshake, ServerHandshakeAck, SessionState,
 };
 
 use crate::capture::{create_capturer, RawFrame};
 use crate::config::ServerConfig;
 use crate::encoder::{CodecChoice, EncoderParams, EncoderPipeline};
-use crate::session::ServerSession;
 
 /// Taille des channels internes (frames en buffer)
 const CAPTURE_CHANNEL_SIZE: usize = 8;
@@ -286,14 +285,17 @@ impl QuicServer {
 
         // Vérification du jeton de session délivré par le broker (si exigé).
         // Empêche un client de contourner le broker en se connectant directement.
+        let mut session_cid: Option<u32> = None;
         if config.security.require_session_token {
             let token = String::from_utf8_lossy(&handshake.session_token);
             match crate::session_token::verify_session_token(&token, &config.security.jwt_secret) {
                 Ok(claims) => {
                     info!(
                         user = %claims.sub, vm = %claims.vm_id,
+                        cid = ?claims.cid,
                         "jeton de session broker validé"
                     );
+                    session_cid = claims.cid;
                 }
                 Err(e) => {
                     warn!(error = %e, client = %remote, "jeton de session refusé — session rejetée");
@@ -381,7 +383,7 @@ impl QuicServer {
             .context("envoi handshake ACK")?;
 
         // 3. Démarrage du pipeline capture → encodage → stream
-        Self::run_session(conn, config, display, session_id, handshake, video_cipher, control_cipher, shutdown).await
+        Self::run_session(conn, config, display, session_id, handshake, video_cipher, control_cipher, shutdown, session_cid).await
     }
 
     /// Réceptionne le handshake initial du client
@@ -500,10 +502,11 @@ impl QuicServer {
         config: ServerConfig,
         display: u32,
         session_id: SessionId,
-        handshake: ClientServerHandshake,
+        _handshake: ClientServerHandshake,
         mut video_cipher: Option<nidan_common::crypto::StreamCipher>,
         control_cipher: Option<nidan_common::crypto::StreamCipher>,
         shutdown: tokio_util::sync::CancellationToken,
+        session_cid: Option<u32>,
     ) -> Result<()> {
         let session_shutdown = tokio_util::sync::CancellationToken::new();
 
@@ -540,7 +543,7 @@ impl QuicServer {
                     // remplace take_frames_receiver() — chaque session
                     // obtient son propre flux, indépendant des précédentes.
                     // Plus besoin de redémarrer le proxy entre deux clients.
-                    let rx = service.subscribe_frames_as_mpsc(session_shutdown.clone());
+                    let rx = service.subscribe_frames_as_mpsc(session_shutdown.clone(), session_cid);
                     // Fermer tx_raw explicitement (inutilisé dans ce chemin).
                     drop(tx_raw);
                     (caps, None, rx)

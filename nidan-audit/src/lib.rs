@@ -61,7 +61,7 @@ impl AuditEngine {
 
     /// Démarre tous les services d'audit
     pub async fn run(self) -> Result<()> {
-        let (event_tx, event_rx) = mpsc::channel::<AuditEvent>(1024);
+        let (_event_tx, event_rx) = mpsc::channel::<AuditEvent>(1024);
         let registry = self.registry.clone();
         let config   = self.config.clone();
 
@@ -168,7 +168,7 @@ impl AuditEngine {
 }
 
 /// Crée un `AuditEventSender` pour qu'un composant puisse émettre des événements
-pub fn make_audit_sender(engine: &AuditEngine) -> Option<AuditEventSender> {
+pub fn make_audit_sender(_engine: &AuditEngine) -> Option<AuditEventSender> {
     // En mode intégré : retourne un sender connecté au moteur
     // En mode daemon : retourne None (le composant contacte le daemon via gRPC)
     None // TODO Phase 4.1 : channel partagé via Arc<Mutex<>>

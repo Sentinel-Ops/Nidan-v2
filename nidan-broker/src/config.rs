@@ -15,6 +15,8 @@ pub struct BrokerConfig {
     pub tls:      TlsConfig,
     pub security: SecurityConfig,
     pub admin:    AdminConfig,
+    #[serde(default)]
+    pub provider: ProviderConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +33,9 @@ pub struct NetworkConfig {
     /// Nombre max de sessions simultanées
     #[serde(default = "default_max_sessions")]
     pub max_sessions: usize,
+    /// Adresse du proxy-encoder retournée aux clients.
+    /// Si absent, le broker retourne l'adresse IP directe de la VM.
+    pub proxy_address: Option<String>,
 }
 
 fn default_quic_bind()      -> String { "0.0.0.0:7443".to_string() }
@@ -115,11 +120,39 @@ pub struct PoolConfig {
     /// Intervalle entre health checks (secondes)
     #[serde(default = "default_health_interval")]
     pub health_check_interval_secs: u64,
+    /// Configuration du pool dynamique (optionnel)
+    #[serde(default)]
+    pub dynamic: Option<DynamicPoolConfig>,
 }
 
 fn default_pool_min()         -> usize { 1 }
 fn default_health_timeout()   -> u64   { 5 }
 fn default_health_interval()  -> u64   { 30 }
+
+/// Configuration du pool dynamique (provisionnement automatique de VMs).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DynamicPoolConfig {
+    /// Nom ou UUID du template libvirt à cloner
+    pub template: String,
+    /// Port QUIC du serveur NIDAN dans les VMs clonées
+    #[serde(default = "default_vm_port")]
+    pub vm_port: u16,
+    /// Début de la plage CID vsock (inclus)
+    #[serde(default = "default_cid_start")]
+    pub cid_start: u32,
+    /// Fin de la plage CID vsock (inclus)
+    #[serde(default = "default_cid_end")]
+    pub cid_end: u32,
+    /// Pattern d'adresse IP des VMs dynamiques.
+    /// `{cid}` sera remplacé par le CID alloué.
+    #[serde(default = "default_vm_ip_pattern")]
+    pub vm_ip_pattern: String,
+}
+
+fn default_vm_port()       -> u16    { 7444 }
+fn default_cid_start()     -> u32    { 10 }
+fn default_cid_end()       -> u32    { 99 }
+fn default_vm_ip_pattern() -> String { "192.168.122.{cid}".to_string() }
 
 /// Entrée de VM dans la configuration statique
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +196,91 @@ pub struct AdminConfig {
     pub metrics_enabled: bool,
 }
 
+
+/// Configuration du provider d'infrastructure VM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    /// Backend : "static" (défaut), "proxmox", "libvirt"
+    #[serde(default = "default_provider_backend")]
+    pub backend: String,
+    /// Configuration libvirt (requise si backend = "libvirt")
+    pub libvirt: Option<LibvirtProviderConfig>,
+    /// Configuration host-agent vsock (requise si backend = "host-agent")
+    pub host_agent: Option<HostAgentProviderConfig>,
+}
+
+fn default_provider_backend() -> String { "static".to_string() }
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_provider_backend(),
+            libvirt: None,
+            host_agent: None,
+        }
+    }
+}
+
+/// Configuration spécifique au backend libvirt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibvirtProviderConfig {
+    /// URI de connexion libvirt (ex: "qemu:///system", "qemu+ssh://root@host/system")
+    #[serde(default = "default_libvirt_uri")]
+    pub uri: String,
+    /// Nom du pool de stockage pour les clones de volumes
+    #[serde(default = "default_libvirt_pool")]
+    pub storage_pool: String,
+    /// Préfixe des noms de VMs gérées par NIDAN
+    #[serde(default = "default_vm_prefix")]
+    pub vm_prefix: String,
+}
+
+fn default_libvirt_uri()  -> String { "qemu:///system".to_string() }
+fn default_libvirt_pool() -> String { "default".to_string() }
+fn default_vm_prefix()    -> String { "nidan-".to_string() }
+
+impl Default for LibvirtProviderConfig {
+    fn default() -> Self {
+        Self {
+            uri:          default_libvirt_uri(),
+            storage_pool: default_libvirt_pool(),
+            vm_prefix:    default_vm_prefix(),
+        }
+    }
+}
+
+/// Configuration spécifique au backend host-agent (vsock).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostAgentProviderConfig {
+    /// CID de l'hôte (convention vsock : toujours 2)
+    #[serde(default = "default_host_cid")]
+    pub host_cid: u32,
+    /// Port vsock du nidan-host-agent
+    #[serde(default = "default_agent_port")]
+    pub port: u32,
+    /// Préfixe des noms de VMs NIDAN (doit matcher la config de l'agent)
+    #[serde(default = "default_vm_prefix")]
+    pub vm_prefix: String,
+    /// Timeout de connexion vsock (secondes)
+    #[serde(default = "default_connect_timeout")]
+    pub connect_timeout_secs: u64,
+}
+
+fn default_host_cid()        -> u32    { 2 }
+fn default_agent_port()      -> u32    { 6900 }
+fn default_connect_timeout() -> u64    { 5 }
+
+impl Default for HostAgentProviderConfig {
+    fn default() -> Self {
+        Self {
+            host_cid: default_host_cid(),
+            port: default_agent_port(),
+            vm_prefix: default_vm_prefix(),
+            connect_timeout_secs: default_connect_timeout(),
+        }
+    }
+}
+
 impl BrokerConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let content = std::fs::read_to_string(path.as_ref())
@@ -185,6 +303,17 @@ impl BrokerConfig {
                 bail!("VM invalide dans pool.static_vms");
             }
         }
+        // Validation du provider
+        match self.provider.backend.as_str() {
+            "static" | "proxmox" | "libvirt" | "host-agent" => {}
+            other => bail!("provider.backend inconnu: {other} (attendu: static, proxmox, libvirt)"),
+        }
+        if self.provider.backend == "libvirt" && self.provider.libvirt.is_none() {
+            bail!("provider.backend=libvirt mais section [provider.libvirt] absente");
+        }
+        if self.provider.backend == "host-agent" && self.provider.host_agent.is_none() {
+            bail!("provider.backend=host-agent mais section [provider.host_agent] absente");
+        }
         Ok(())
     }
 }
@@ -197,6 +326,7 @@ impl Default for BrokerConfig {
                 admin_bind:           default_admin_bind(),
                 session_timeout_secs: default_session_timeout(),
                 max_sessions:         default_max_sessions(),
+                proxy_address:        None,
             },
             auth: AuthConfig {
                 enabled_methods:      default_auth_methods(),
@@ -213,6 +343,7 @@ impl Default for BrokerConfig {
                 min_available:               default_pool_min(),
                 health_check_timeout_secs:   default_health_timeout(),
                 health_check_interval_secs:  default_health_interval(),
+                dynamic:                     None,
             },
             tls: TlsConfig {
                 ca_cert: "/etc/nidan/certs/ca.crt".to_string(),
@@ -230,6 +361,7 @@ impl Default for BrokerConfig {
                 admin_token:     None,
                 metrics_enabled: true,
             },
+            provider: ProviderConfig::default(),
         }
     }
 }

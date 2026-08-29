@@ -14,7 +14,7 @@
 //! [rotation]    ← après retention_days, archivage ou suppression
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};

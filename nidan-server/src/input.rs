@@ -4,10 +4,10 @@
 //! Reçoit les `InputEvent` du client et les rejoue sur le display X de la VM.
 //! Derrière la feature `x11-capture` (même dépendance x11rb que la capture).
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tracing::{debug, warn};
 
-use nidan_proto::{InputBatch, InputEventPayload};
+use nidan_proto::InputBatch;
 
 /// Types d'événements X (protocole X11)
 #[cfg(feature = "x11-capture")]
@@ -36,7 +36,7 @@ pub struct InputInjector {
 
 impl InputInjector {
     /// Crée un injecteur connecté au display X
-    pub fn new(display_number: u32, width: u32, height: u32) -> Result<Self> {
+    pub fn new(_display_number: u32, width: u32, height: u32) -> Result<Self> {
         #[cfg(feature = "x11-capture")]
         {
             use x11rb::connection::{Connection, RequestConnection as _};

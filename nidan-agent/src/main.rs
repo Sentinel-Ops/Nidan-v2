@@ -234,7 +234,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 9. Tâche : consommer les commandes du proxy (Start/Stop/Inputs).
     let shutdown_cmd = shutdown.clone();
-    let injector_task = injector.clone();
+    let _injector_task = injector.clone();
     tokio::spawn(async move {
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {

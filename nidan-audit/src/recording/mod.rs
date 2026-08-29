@@ -18,14 +18,14 @@
 //! Le hash final est stocké dans les tags MKV et signé HMAC.
 //! Toute modification d'une frame passée invalide la chaîne.
 
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use nidan_proto::VideoFrame;
 

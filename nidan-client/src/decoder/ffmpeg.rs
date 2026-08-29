@@ -3,8 +3,7 @@
 //! Gère H.264, H.265 et AV1 en software et hardware (VAAPI/VDPAU/DXVA2).
 //! Produit des frames BGRA prêtes pour SDL2/wgpu.
 
-use anyhow::{Context, Result};
-use tracing::{info, warn};
+use anyhow::Result;
 
 use super::DecoderCodec;
 
@@ -79,7 +78,7 @@ impl FfmpegDecoder {
     /// Retourne `Ok(Some(pixels))` si une frame est disponible,
     /// `Ok(None)` si la frame est bufferisée (B-frames),
     /// `Err` sur erreur fatale.
-    pub fn decode_packet(&mut self, nal: &[u8], is_keyframe: bool) -> Result<Option<Vec<u8>>> {
+    pub fn decode_packet(&mut self, _nal: &[u8], is_keyframe: bool) -> Result<Option<Vec<u8>>> {
         // Si on attend un IDR et ce n'est pas un keyframe → skip
         if self.need_idr && !is_keyframe {
             return Ok(None);

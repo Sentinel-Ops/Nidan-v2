@@ -19,7 +19,7 @@ mod config;
 mod pool;
 mod routing;
 mod session;
-mod proxmox;
+mod provider;
 
 use config::BrokerConfig;
 

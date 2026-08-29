@@ -7,8 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 
-use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use nidan_common::session::SessionId;
 use nidan_proto::{AuthMethod, BrokerSessionResponse, ClientSessionRequest};
@@ -16,6 +15,7 @@ use nidan_proto::{AuthMethod, BrokerSessionResponse, ClientSessionRequest};
 use crate::auth::{AuthEngine, AuthOutcome};
 use crate::config::BrokerConfig;
 use crate::pool::VmPool;
+use crate::provider;
 use crate::session::{BrokerSession, BrokerSessionState, SessionRegistry};
 
 /// État partagé du broker (Arc-wrappé pour partage entre tâches)
@@ -29,14 +29,17 @@ pub struct BrokerState {
 
 impl BrokerState {
     pub async fn new(config: BrokerConfig) -> Result<Arc<Self>> {
+        let vm_provider = provider::build_provider(&config.provider)
+            .context("construction du provider VM")?;
+
         let pool = match build_health_endpoint(&config) {
             Ok(ep) => {
                 tracing::info!("health check : handshake QUIC réel activé");
-                VmPool::from_config_with_health(config.pool.clone(), Some(ep))
+                VmPool::from_config_with_provider(config.pool.clone(), Some(ep), vm_provider.clone())
             }
             Err(e) => {
                 tracing::warn!(error = %e, "endpoint health QUIC indisponible — repli sonde UDP");
-                VmPool::from_config(config.pool.clone())
+                VmPool::from_config_with_provider(config.pool.clone(), None, vm_provider)
             }
         };
         let sessions = SessionRegistry::new();
@@ -173,7 +176,7 @@ async fn handle_client(
                 Some(request.preferred_vm_tag.as_str())
             };
 
-            let vm = match state.pool.assign(session_id.as_ref(), preferred_tag) {
+            let vm = match state.pool.assign_or_provision(session_id.as_ref(), preferred_tag).await {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(error = %e, user = %identity.user_id, "pas de VM disponible");
@@ -192,6 +195,7 @@ async fn handle_client(
                 &identity,
                 session_id.as_ref(),
                 &vm.id,
+                vm.cid,
             ).context("génération session token")?;
 
             // Le broker ne participe PAS à l'échange de clés E2E : le client
@@ -201,7 +205,9 @@ async fn handle_client(
                 auth_result:    nidan_proto::AuthResult::Success as i32,
                 session_id:     session_id.to_string(),
                 vm_id:          vm.id.clone(),
-                server_address: vm.addr(),
+                server_address: state.config.network.proxy_address
+                    .clone()
+                    .unwrap_or_else(|| vm.addr()),
                 session_token:  token.into_bytes(),
                 server_nonce:      vec![],
                 server_public_key: vec![],
@@ -246,7 +252,7 @@ async fn handle_client(
                         conn.close(3u32.into(), b"session timeout");
                     }
                 }
-                state_clone.pool.release(&vm_id_clone, &session_id_str);
+                state_clone.pool.release(&vm_id_clone, &session_id_str).await;
                 state_clone.sessions.close(&session_id_str);
                 info!(session_id = %session_id_str, "session broker fermée");
             });

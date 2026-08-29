@@ -24,11 +24,11 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use nidan_common::session::SessionId;
 use nidan_proto::{
-    BrokerSessionResponse, ClientServerHandshake, ClientSessionRequest,
+    ClientServerHandshake,
     InputBatch, ServerHandshakeAck, VideoFrame,
 };
 
@@ -36,7 +36,6 @@ use crate::config::ClientConfig;
 use crate::decoder::{DecoderPipeline, DecodedFrame};
 use crate::input::{InputEvent, InputSender};
 use crate::renderer;
-use crate::session::ClientSession;
 
 const VIDEO_CHANNEL_SIZE:  usize = 8;
 const DECODED_CHANNEL_SIZE: usize = 4;
@@ -180,7 +179,7 @@ impl NidanClient {
         info!(remote = %conn.remote_address(), "connexion QUIC serveur établie");
 
         // ── Handshake ──────────────────────────────────────────────────────
-        let (ack, mut video_cipher, mut control_cipher) = Self::do_handshake(&conn, &self.config, &session_token).await
+        let (ack, video_cipher, mut control_cipher) = Self::do_handshake(&conn, &self.config, &session_token).await
             .context("handshake serveur")?;
 
         // Priorité : config forcée > résolution annoncée par le serveur > défaut
@@ -192,14 +191,14 @@ impl NidanClient {
         info!(width, height, codec = ack.selected_codec, "handshake OK — démarrage session");
 
         // ── Pipeline ───────────────────────────────────────────────────────
-        let (tx_video, rx_video) = mpsc::channel::<VideoFrame>(VIDEO_CHANNEL_SIZE);
-        let (tx_decoded, rx_decoded_sync) = {
-            let (s, r) = std::sync::mpsc::sync_channel::<DecodedFrame>(DECODED_CHANNEL_SIZE);
+        let (_tx_video, _rx_video) = mpsc::channel::<VideoFrame>(VIDEO_CHANNEL_SIZE);
+        let (_tx_decoded, _rx_decoded_sync) = {
+            let (_s, r) = std::sync::mpsc::sync_channel::<DecodedFrame>(DECODED_CHANNEL_SIZE);
             // Adaptateur : tokio mpsc → std sync_channel pour SDL2
-            let (ts, tr) = mpsc::channel::<DecodedFrame>(DECODED_CHANNEL_SIZE);
+            let (ts, _tr) = mpsc::channel::<DecodedFrame>(DECODED_CHANNEL_SIZE);
             (ts, r)
         };
-        let (tx_input, rx_input)   = mpsc::channel::<InputEvent>(INPUT_CHANNEL_SIZE);
+        let (_tx_input, _rx_input)   = mpsc::channel::<InputEvent>(INPUT_CHANNEL_SIZE);
         let (tx_batch, mut rx_batch) = mpsc::channel::<InputBatch>(64);
 
         // Démarrage du décodeur
@@ -215,7 +214,7 @@ impl NidanClient {
         // Renderer SDL2 dans thread dédié (std::thread car SDL2)
         let (frame_tx_sdl, frame_rx_sdl) = std::sync::mpsc::sync_channel::<DecodedFrame>(4);
         let (input_tx_sdl, input_rx_sdl) = mpsc::channel::<InputEvent>(INPUT_CHANNEL_SIZE);
-        let (metrics_tx, metrics_rx)     = tokio::sync::watch::channel(
+        let (metrics_tx, _metrics_rx)     = tokio::sync::watch::channel(
             renderer::RenderMetrics::default()
         );
         let display_cfg = self.config.display.clone();

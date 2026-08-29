@@ -4,7 +4,7 @@
 //! Ces tokens sont à courte durée de vie (5 min par défaut) et servent
 //! à autoriser la connexion client → serveur après validation broker.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,9 @@ pub struct SessionClaims {
     pub groups: Vec<String>,
     /// Realm (Kerberos/OIDC)
     pub realm: Option<String>,
+    /// CID vsock de la VM assignée (pour le proxy-encoder)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cid: Option<u32>,
 }
 
 /// Moteur JWT
@@ -62,6 +65,7 @@ impl JwtEngine {
         identity:   &AuthIdentity,
         session_id: &str,
         vm_id:      &str,
+        cid:        Option<u32>,
     ) -> Result<String> {
         let now = Utc::now();
         let exp = now + Duration::seconds(self.ttl_secs as i64);
@@ -76,6 +80,7 @@ impl JwtEngine {
             auth_method: identity.method.to_string(),
             groups:      identity.groups.clone(),
             realm:       identity.realm.clone(),
+            cid,
         };
 
         encode(&Header::default(), &claims, &self.encoding_key)
@@ -126,7 +131,7 @@ mod tests {
             300,
         );
         let identity = make_identity();
-        let token = engine.sign(&identity, "sess-001", "vm-001").unwrap();
+        let token = engine.sign(&identity, "sess-001", "vm-001", Some(42)).unwrap();
         assert!(!token.is_empty());
 
         let claims = engine.verify(&token).unwrap();
@@ -134,6 +139,7 @@ mod tests {
         assert_eq!(claims.session_id, "sess-001");
         assert_eq!(claims.vm_id, "vm-001");
         assert_eq!(claims.auth_method, "mTLS");
+        assert_eq!(claims.cid, Some(42));
     }
 
     #[test]
@@ -144,7 +150,7 @@ mod tests {
             "nidan-broker".to_string(),
             0,
         );
-        let token = engine.sign(&make_identity(), "s", "v").unwrap();
+        let token = engine.sign(&make_identity(), "s", "v", None).unwrap();
         // Attendre pour garantir l'expiration (leeway=0)
         std::thread::sleep(std::time::Duration::from_secs(2));
         assert!(engine.verify(&token).is_err(), "token expiré doit être rejeté");
@@ -157,7 +163,7 @@ mod tests {
             "nidan-broker".to_string(),
             300,
         );
-        let mut token = engine.sign(&make_identity(), "s", "v").unwrap();
+        let mut token = engine.sign(&make_identity(), "s", "v", None).unwrap();
         // Altération du payload
         token.push_str("x");
         assert!(engine.verify(&token).is_err());
@@ -173,7 +179,7 @@ mod tests {
             "secret_key_number_two_32_chars!!!".to_string(),
             "nidan-broker".to_string(), 300,
         );
-        let token = engine1.sign(&make_identity(), "s", "v").unwrap();
+        let token = engine1.sign(&make_identity(), "s", "v", None).unwrap();
         assert!(engine2.verify(&token).is_err(), "mauvaise clé doit être rejetée");
     }
 }

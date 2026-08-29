@@ -19,12 +19,12 @@
 //! [DecodedFrame → channel renderer]
 //! ```
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use nidan_common::crypto::StreamCipher;
-use nidan_proto::{VideoCodec, VideoFrame};
+use nidan_proto::VideoFrame;
 
 pub mod ffmpeg;
 pub mod openh264_dec;

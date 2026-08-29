@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 // Types générés depuis agent.proto par prost-build.
 use nidan_proto::agent::{
     agent_message, AgentHello, AgentMessage, AgentStopReason, AgentStopped,
-    PixelFormat, ProxyHelloAck, RawFrame as ProtoRawFrame, StartCapture,
+    PixelFormat, RawFrame as ProtoRawFrame, StartCapture,
     StopCapture,
 };
 
@@ -106,7 +106,7 @@ pub async fn connect_and_handshake(
 /// capturer local, les envoie sur vsock. En parallèle, lit les messages
 /// entrants du proxy (Stop, InputBatch) et les propage.
 pub async fn run_session(
-    mut stream: VsockStream,
+    stream: VsockStream,
     mut frames_rx: mpsc::Receiver<crate::capture::RawFrame>,
     cmd_tx: mpsc::Sender<ProxyCommand>,
     format: PixelFormat,

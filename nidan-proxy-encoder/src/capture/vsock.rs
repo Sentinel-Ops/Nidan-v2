@@ -145,7 +145,7 @@ impl Capturer for VsockCapturer {
             // quel CID (utile : ça marche que l'agent soit dans n'importe quelle
             // VM du pool, sans qu'on ait à durcir le CID côté proxy).
             let listen_addr = VsockAddr::new(VMADDR_CID_ANY, port);
-            let mut listener = VsockListener::bind(listen_addr)
+            let listener = VsockListener::bind(listen_addr)
                 .with_context(|| format!("bind vsock port {port}"))?;
 
             // Boucle d'accept : on n'accepte qu'une session à la fois (le proxy
@@ -181,21 +181,31 @@ impl Capturer for VsockCapturer {
 
                         // Une session complète est gérée. Elle se termine soit
                         // sur EOF de l'agent, soit sur shutdown, soit sur erreur.
-                        let result = run_session(
-                            stream,
-                            tx.clone(),
-                            inputs_rx,
-                            fps_limit,
-                            shutdown.clone(),
-                            self.shared_caps.clone(),
-                            self.caps_notify.clone(),
-                        )
-                        .await;
-
-                        if let Err(e) = result {
-                            warn!(error = %e, "session vsock terminée avec erreur");
-                        }
-                        info!("VsockCapturer : session terminée, en attente d'une nouvelle connexion");
+                        let peer_cid = peer.cid();
+                        let session_tx = tx.clone();
+                        let session_fps = fps_limit;
+                        let session_sd = shutdown.clone();
+                        let session_caps = self.shared_caps.clone();
+                        let session_notify = self.caps_notify.clone();
+                        let session_inputs = inputs_rx;
+                        // Multi-agent : chaque connexion agent est gérée dans
+                        // sa propre tâche, permettant plusieurs VMs simultanées.
+                        tokio::spawn(async move {
+                            let result = run_session(
+                                stream,
+                                session_tx,
+                                session_inputs,
+                                session_fps,
+                                session_sd,
+                                session_caps,
+                                session_notify,
+                                peer_cid,
+                            ).await;
+                            if let Err(e) = result {
+                                warn!(error = %e, peer_cid, "session agent terminée avec erreur");
+                            }
+                            info!(peer_cid, "VsockCapturer : session agent terminée");
+                        });
                     }
                 }
             }
@@ -213,6 +223,7 @@ async fn run_session(
     shutdown: CancellationToken,
     shared_caps_opt: Option<Arc<tokio::sync::RwLock<Option<CapturerCapabilities>>>>,
     caps_notify_opt: Option<Arc<tokio::sync::Notify>>,
+    peer_cid: u32,
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(stream);
 
@@ -347,6 +358,7 @@ async fn run_session(
                             seq:          proto_frame.frame_seq,
                             is_keyframe,
                             damage_rects: vec![],
+                            source_cid:   Some(peer_cid),
                         };
                         if frames_tx.send(raw).await.is_err() {
                             warn!("channel encodeur fermé — arrêt de la session vsock");

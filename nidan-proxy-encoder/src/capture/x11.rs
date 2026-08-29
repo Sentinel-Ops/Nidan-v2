@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::{Capturer, CapturerCapabilities, PixelFormat, RawFrame};
 
@@ -199,7 +199,7 @@ impl X11Capturer {
 
             let frame = RawFrame {
                 data, width, height, stride: width * 4,
-                timestamp_us, seq, is_keyframe, damage_rects: vec![],
+                timestamp_us, seq, is_keyframe, damage_rects: vec![], source_cid: None,
             };
 
             match tx.try_send(frame) {
@@ -248,7 +248,7 @@ impl X11Capturer {
                 timestamp_us: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default().as_micros() as u64,
-                seq, is_keyframe: seq % 60 == 0, damage_rects: vec![],
+                seq, is_keyframe: seq % 60 == 0, damage_rects: vec![], source_cid: None,
             };
             if tx.try_send(frame).is_err() { break; }
             seq += 1;

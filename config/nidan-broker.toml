@@ -82,3 +82,16 @@ audit_all_auth     = true
 [admin]
 metrics_enabled = true
 # admin_token = "token-admin-secret"  # optionnel
+
+# ── Provider d'infrastructure VM ─────────────────────────────────────────────
+[provider]
+# Backend : "static" (défaut — VMs déclarées dans [pool]),
+#            "libvirt" (KVM/QEMU via libvirtd),
+#            "proxmox" (API Proxmox VE — Phase 4)
+backend = "static"
+
+# Configuration libvirt (uniquement si backend = "libvirt")
+# [provider.libvirt]
+# uri          = "qemu:///system"
+# storage_pool = "default"
+# vm_prefix    = "nidan-"

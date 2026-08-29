@@ -4,15 +4,14 @@
 //! Gère la fenêtre, la texture vidéo, les événements et le HUD.
 
 use std::sync::mpsc;
-use std::time::Instant;
 
-use anyhow::{Context, Result};
-use tracing::{debug, info, warn};
+use anyhow::Result;
+use tracing::info;
 
 use crate::config::DisplayConfig;
 use crate::decoder::DecodedFrame;
 use crate::input::InputEvent;
-use crate::renderer::{ConnectionStatus, RenderMetrics, RenderRect, ScalingMode};
+use crate::renderer::{ConnectionStatus, RenderMetrics};
 
 /// Point d'entrée de la boucle SDL2
 pub fn run_sdl2_loop(

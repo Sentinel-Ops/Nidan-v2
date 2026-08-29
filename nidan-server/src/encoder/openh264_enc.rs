@@ -4,7 +4,7 @@
 //! Pas de dépendance système : openh264 compile son code C bundlé.
 
 use anyhow::{Context, Result};
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::capture::RawFrame;
 use super::params::EncoderParams;

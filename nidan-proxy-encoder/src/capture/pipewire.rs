@@ -225,6 +225,7 @@ fn run_pipewire_loop(
                         seq: frame_seq.fetch_add(1, Ordering::Relaxed),
                         is_keyframe: true,
                         damage_rects: Vec::new(),
+                        source_cid: None,
                     };
                     // Envoi non bloquant vers le pipeline d'encodage.
                     if tx_frames.try_send(frame).is_err() {

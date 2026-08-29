@@ -5,19 +5,18 @@
 //! - **Statique** : VMs déclarées en configuration (Phase 3)
 //! - **Dynamique** : spawn/destroy via libvirt/QEMU (Phase 4+)
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use crate::config::{PoolConfig, VmEntry};
+use crate::config::PoolConfig;
+use crate::provider::{VmProvider, StaticProvider};
 
 /// État d'une VM dans le pool
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,11 +59,54 @@ pub struct VmPoolEntry {
     pub added_at:    DateTime<Utc>,
     pub last_health: Option<DateTime<Utc>>,
     pub sessions_served: u64,
+    /// VM provisionnée dynamiquement (clone) vs déclarée statiquement
+    pub dynamic:     bool,
+    /// Identifiant provider (UUID libvirt) pour les VMs dynamiques
+    pub provider_id: Option<String>,
+    /// CID vsock alloué (VMs dynamiques)
+    pub cid:         Option<u32>,
 }
 
 impl VmPoolEntry {
     pub fn addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+}
+
+
+/// Allocateur de CIDs vsock pour les VMs dynamiques.
+///
+/// Gère une plage de CIDs [start..=end] et suit ceux en cours d'utilisation.
+pub struct CidAllocator {
+    start: u32,
+    end:   u32,
+    used:  std::collections::HashSet<u32>,
+}
+
+impl CidAllocator {
+    pub fn new(start: u32, end: u32) -> Self {
+        Self { start, end, used: std::collections::HashSet::new() }
+    }
+
+    /// Alloue le prochain CID libre, ou None si la plage est pleine.
+    pub fn allocate(&mut self) -> Option<u32> {
+        for cid in self.start..=self.end {
+            if !self.used.contains(&cid) {
+                self.used.insert(cid);
+                return Some(cid);
+            }
+        }
+        None
+    }
+
+    /// Libère un CID.
+    pub fn release(&mut self, cid: u32) {
+        self.used.remove(&cid);
+    }
+
+    /// Nombre de CIDs encore disponibles.
+    pub fn available(&self) -> usize {
+        (self.end - self.start + 1) as usize - self.used.len()
     }
 }
 
@@ -75,25 +117,47 @@ pub struct VmPool {
     /// Endpoint QUIC client pour les health checks (handshake réel vers les VM).
     /// Si None, repli sur une sonde de joignabilité UDP.
     health_endpoint: Option<quinn::Endpoint>,
+    /// Provider d'infrastructure VM (Proxmox, libvirt, ou StaticProvider).
+    provider: Arc<dyn VmProvider>,
+    /// Allocateur de CIDs vsock pour les VMs dynamiques.
+    cid_allocator: std::sync::Mutex<CidAllocator>,
 }
 
 impl VmPool {
     /// Crée un pool depuis la configuration statique (sans endpoint QUIC :
     /// les health checks utilisent la sonde de joignabilité UDP).
+    /// Utilise le `StaticProvider` par défaut.
     pub fn from_config(config: PoolConfig) -> Arc<Self> {
-        Self::from_config_with_health(config, None)
+        Self::build(config, None, Arc::new(StaticProvider))
     }
 
-    /// Crée un pool avec un endpoint QUIC dédié aux health checks, permettant
-    /// un handshake réel vers les VM (vérifie qu'un serveur NIDAN répond).
-    pub fn from_config_with_health(
+    /// Crée un pool avec un endpoint QUIC dédié et un provider spécifique.
+    pub fn from_config_with_provider(
         config: PoolConfig,
         health_endpoint: Option<quinn::Endpoint>,
+        provider: Arc<dyn VmProvider>,
     ) -> Arc<Self> {
+        Self::build(config, health_endpoint, provider)
+    }
+
+    /// Constructeur interne commun.
+    fn build(
+        config: PoolConfig,
+        health_endpoint: Option<quinn::Endpoint>,
+        provider: Arc<dyn VmProvider>,
+    ) -> Arc<Self> {
+        let cid_alloc = if let Some(ref dc) = config.dynamic {
+            CidAllocator::new(dc.cid_start, dc.cid_end)
+        } else {
+            CidAllocator::new(10, 99) // plage par défaut, inutilisée sans dynamic
+        };
+
         let pool = Arc::new(Self {
             vms:    DashMap::new(),
             config: config.clone(),
             health_endpoint,
+            provider,
+            cid_allocator: std::sync::Mutex::new(cid_alloc),
         });
 
         for vm in &config.static_vms {
@@ -106,6 +170,9 @@ impl VmPool {
                 added_at:        Utc::now(),
                 last_health:     None,
                 sessions_served: 0,
+                dynamic:         false,
+                provider_id:     None,
+                cid:             None,
             };
             info!(vm_id = %vm.id, addr = %entry.addr(), "VM ajoutée au pool");
             pool.vms.insert(vm.id.clone(), entry);
@@ -159,13 +226,122 @@ impl VmPool {
         }
     }
 
-    /// Libère une VM après la fin d'une session
-    pub fn release(&self, vm_id: &str, session_id: &str) {
-        if let Some(mut entry) = self.vms.get_mut(vm_id) {
+
+    /// Assigne une VM (statique ou dynamique) à une session.
+    ///
+    /// 1. Tente d'abord l'assignation statique (VMs disponibles dans le pool).
+    /// 2. Si le pool est vide et qu'un `DynamicPoolConfig` est configuré,
+    ///    provisionne automatiquement une nouvelle VM via le provider (clone +
+    ///    set_vsock_cid + start).
+    pub async fn assign_or_provision(
+        &self,
+        session_id: &str,
+        preferred_tag: Option<&str>,
+    ) -> Result<VmPoolEntry> {
+        // 1. Tentative statique
+        if let Ok(vm) = self.assign(session_id, preferred_tag) {
+            return Ok(vm);
+        }
+
+        // 2. Provisionnement dynamique
+        let dyn_cfg = self.config.dynamic.as_ref()
+            .ok_or_else(|| anyhow::anyhow!(
+                "aucune VM disponible et pool dynamique non configuré"
+            ))?;
+
+        // Allouer un CID
+        let cid = {
+            let mut alloc = self.cid_allocator.lock()
+                .map_err(|_| anyhow::anyhow!("lock CidAllocator poisonné"))?;
+            alloc.allocate()
+                .ok_or_else(|| anyhow::anyhow!(
+                    "plus de CIDs disponibles (plage {}-{} épuisée)",
+                    dyn_cfg.cid_start, dyn_cfg.cid_end
+                ))?
+        };
+
+        // Clone depuis le template (nom auto-généré par le provider)
+        info!(
+            template = %dyn_cfg.template,
+            cid = cid,
+            session_id,
+            "provisionnement dynamique"
+        );
+
+        let new_vm = match self.provider.clone_vm(&dyn_cfg.template, "").await {
+            Ok(vm) => vm,
+            Err(e) => {
+                // Libérer le CID en cas d'échec
+                if let Ok(mut alloc) = self.cid_allocator.lock() {
+                    alloc.release(cid);
+                }
+                return Err(e.context("clone template"));
+            }
+        };
+        let provider_id = new_vm.provider_id.clone();
+        let vm_name = new_vm.name.clone().unwrap_or_else(|| format!("dyn-{cid}"));
+
+        // Configurer le CID vsock
+        if let Err(e) = self.provider.set_vsock_cid(&provider_id, cid).await {
+            warn!(error = %e, cid = cid, "set_vsock_cid échoué — continue sans vsock");
+        }
+
+        // Démarrer la VM
+        if let Err(e) = self.provider.start_vm(&provider_id).await {
+            // Nettoyage en cas d'échec au démarrage
+            warn!(error = %e, "start échoué — suppression de la VM clonée");
+            let _ = self.provider.delete_vm(&provider_id).await;
+            if let Ok(mut alloc) = self.cid_allocator.lock() {
+                alloc.release(cid);
+            }
+            return Err(e.context("démarrage VM dynamique"));
+        }
+
+        // Calculer l'adresse de la VM
+        let host = dyn_cfg.vm_ip_pattern.replace("{cid}", &cid.to_string());
+
+        // Créer l'entrée dans le pool, directement en état Assigned
+        let entry = VmPoolEntry {
+            id:              vm_name.clone(),
+            host,
+            port:            dyn_cfg.vm_port,
+            tags:            vec!["dynamic".to_string()],
+            state:           VmState::Assigned {
+                session_id: session_id.to_string(),
+                since: Utc::now(),
+            },
+            added_at:        Utc::now(),
+            last_health:     None,
+            sessions_served: 1,
+            dynamic:         true,
+            provider_id:     Some(provider_id),
+            cid:             Some(cid),
+        };
+
+        info!(
+            vm_id      = %entry.id,
+            cid        = cid,
+            addr       = %entry.addr(),
+            session_id,
+            "VM dynamique provisionnée et assignée"
+        );
+
+        let result = entry.clone();
+        self.vms.insert(vm_name, entry);
+        Ok(result)
+    }
+
+    /// Libère une VM après la fin d'une session.
+    ///
+    /// - **VMs statiques** : remise en état `Available` pour réutilisation.
+    /// - **VMs dynamiques** : arrêt + suppression via le provider, libération
+    ///   du CID vsock, retrait du pool.
+    pub async fn release(&self, vm_id: &str, session_id: &str) {
+        // Récupérer les infos de la VM avant modification
+        let vm_info = if let Some(entry) = self.vms.get(vm_id) {
             match &entry.state {
                 VmState::Assigned { session_id: sid, .. } if sid == session_id => {
-                    entry.state = VmState::Available;
-                    info!(vm_id = %vm_id, session_id, "VM libérée");
+                    Some((entry.dynamic, entry.provider_id.clone(), entry.cid))
                 }
                 other => {
                     warn!(
@@ -174,7 +350,58 @@ impl VmPool {
                         state      = other.label(),
                         "tentative de libération d'une VM dans un état inattendu"
                     );
+                    None
                 }
+            }
+        } else {
+            warn!(vm_id = %vm_id, session_id, "VM introuvable pour release");
+            None
+        };
+
+        let Some((is_dynamic, provider_id, cid)) = vm_info else {
+            return;
+        };
+
+        if is_dynamic {
+            // ── VM dynamique : destruction complète ──
+            if let Some(ref pid) = provider_id {
+                info!(
+                    vm_id = %vm_id,
+                    session_id,
+                    "destruction VM dynamique post-session"
+                );
+                // Arrêt (best-effort, delete_vm gère le cas déjà arrêté)
+                if let Err(e) = self.provider.stop_vm(pid).await {
+                    debug!(
+                        error = %e, vm_id = %vm_id,
+                        "stop VM échoué — delete tentera quand même"
+                    );
+                }
+                // Suppression (VM + volumes)
+                if let Err(e) = self.provider.delete_vm(pid).await {
+                    warn!(
+                        error = %e, vm_id = %vm_id,
+                        "delete VM dynamique échoué — VM orpheline possible"
+                    );
+                }
+            }
+
+            // Libérer le CID
+            if let Some(cid_val) = cid {
+                if let Ok(mut alloc) = self.cid_allocator.lock() {
+                    alloc.release(cid_val);
+                    debug!(cid = cid_val, "CID libéré");
+                }
+            }
+
+            // Retirer du pool
+            self.vms.remove(vm_id);
+            info!(vm_id = %vm_id, session_id, "VM dynamique détruite et retirée du pool");
+        } else {
+            // ── VM statique : remise en état Available ──
+            if let Some(mut entry) = self.vms.get_mut(vm_id) {
+                entry.state = VmState::Available;
+                info!(vm_id = %vm_id, session_id, "VM statique libérée");
             }
         }
     }
@@ -212,6 +439,11 @@ impl VmPool {
     /// Retourne une VM par ID
     pub fn get(&self, vm_id: &str) -> Option<VmPoolEntry> {
         self.vms.get(vm_id).map(|e| e.clone())
+    }
+
+    /// Retourne une référence au provider d'infrastructure.
+    pub fn provider(&self) -> &dyn VmProvider {
+        self.provider.as_ref()
     }
 
     /// Cherche une VM disponible avec tag optionnel
@@ -350,6 +582,7 @@ mod tests {
             min_available:               1,
             health_check_timeout_secs:   1,
             health_check_interval_secs:  999, // désactiver en test
+            dynamic:                     None,
         })
     }
 
@@ -362,7 +595,7 @@ mod tests {
         let vm = pool.assign("sess-001", None).unwrap();
         assert_eq!(pool.status().available, 1);
 
-        pool.release(&vm.id, "sess-001");
+        pool.release(&vm.id, "sess-001").await;
         assert_eq!(pool.status().available, 2);
     }
 
@@ -378,7 +611,7 @@ mod tests {
         let pool = make_pool(3);
         // La première assignation prend la VM avec le moins de sessions
         let v1 = pool.assign("s1", None).unwrap();
-        pool.release(&v1.id, "s1");
+        pool.release(&v1.id, "s1").await;
         let v2 = pool.assign("s2", None).unwrap();
         // Après release, la même VM peut être réassignée
         assert!(!v2.id.is_empty());

@@ -302,9 +302,14 @@ impl VsockService {
     /// termine proprement quand `shutdown` est déclenché, quand la session
     /// cliente ferme son côté du canal, ou quand la source broadcast se
     /// ferme (agent déconnecté / proxy en arrêt).
+    /// S'abonne aux frames, avec filtrage optionnel par CID source.
+    ///
+    /// - `filter_cid = None` : reçoit les frames de TOUS les agents (rétrocompat mono-VM).
+    /// - `filter_cid = Some(10)` : reçoit uniquement les frames de l'agent CID 10.
     pub fn subscribe_frames_as_mpsc(
         &self,
         shutdown: CancellationToken,
+        filter_cid: Option<u32>,
     ) -> mpsc::Receiver<RawFrame> {
         let mut broadcast_rx = self.subscribe_frames();
         let (adapt_tx, adapt_rx) = mpsc::channel::<RawFrame>(FRAMES_CHANNEL_SIZE);
@@ -318,9 +323,13 @@ impl VsockService {
                     frame = broadcast_rx.recv() => {
                         match frame {
                             Ok(f) => {
+                                // Filtrage par CID source (multi-VM)
+                                if let Some(target_cid) = filter_cid {
+                                    if f.source_cid != Some(target_cid) {
+                                        continue; // frame d'un autre agent
+                                    }
+                                }
                                 if adapt_tx.send(f).await.is_err() {
-                                    // La session cliente a fermé son côté :
-                                    // fin de session normale.
                                     break;
                                 }
                             }

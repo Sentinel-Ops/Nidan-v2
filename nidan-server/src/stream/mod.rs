@@ -27,13 +27,12 @@ use tracing::{error, info, warn};
 
 use nidan_common::session::SessionId;
 use nidan_proto::{
-    ClientServerHandshake, ServerHandshakeAck, SessionState, VideoFrame,
+    ClientServerHandshake, ServerHandshakeAck, SessionState,
 };
 
 use crate::capture::{create_capturer, RawFrame};
 use crate::config::ServerConfig;
 use crate::encoder::{CodecChoice, EncoderParams, EncoderPipeline};
-use crate::session::ServerSession;
 
 /// Taille des channels internes (frames en buffer)
 const CAPTURE_CHANNEL_SIZE: usize = 8;
@@ -429,7 +428,7 @@ impl QuicServer {
         config: ServerConfig,
         display: u32,
         session_id: SessionId,
-        handshake: ClientServerHandshake,
+        _handshake: ClientServerHandshake,
         mut video_cipher: Option<nidan_common::crypto::StreamCipher>,
         control_cipher: Option<nidan_common::crypto::StreamCipher>,
         shutdown: tokio_util::sync::CancellationToken,

@@ -5,7 +5,7 @@
 //! des frames vidéo/audio.
 
 use chacha20poly1305::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
+    aead::{Aead, KeyInit, OsRng},
     ChaCha20Poly1305, Key, Nonce,
 };
 use hkdf::Hkdf;

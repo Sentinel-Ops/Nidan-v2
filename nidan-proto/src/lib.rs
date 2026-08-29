@@ -470,6 +470,14 @@ mod tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PROTOCOLE — canal vsock broker ↔ host-agent (canal 2)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Types manuels (serde/JSON) pour le protocole de pilotage de l'hyperviseur
+// depuis le broker VM vers le nidan-host-agent sur le socle.
+pub mod host_agent;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PROTOCOLE V2 — canal vsock agent ↔ proxy-encoder
 // ─────────────────────────────────────────────────────────────────────────────
 //

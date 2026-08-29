@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 pub mod x11;
 
@@ -46,6 +46,8 @@ pub struct RawFrame {
     pub is_keyframe: bool,
     /// Rectangle(s) modifié(s) depuis la frame précédente (optionnel)
     pub damage_rects: Vec<DamageRect>,
+    /// CID vsock de l'agent source (None pour capture locale)
+    pub source_cid: Option<u32>,
 }
 
 /// Rectangle de dommage (région modifiée)
@@ -237,6 +239,7 @@ impl Capturer for StubCapturer {
                             seq,
                             is_keyframe: seq == 0 || seq % 60 == 0,
                             damage_rects: vec![],
+                            source_cid: None,
                         };
 
                         if tx.send(frame).await.is_err() {

@@ -4,7 +4,7 @@
 //! qui produit des données synthétiques pour les tests.
 
 use anyhow::{Context, Result};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::capture::RawFrame;
 use super::params::EncoderParams;
@@ -62,7 +62,7 @@ impl FfmpegEncoder {
         })
     }
 
-    fn init_encoder(params: &EncoderParams) -> Result<EncoderInner> {
+    fn init_encoder(_params: &EncoderParams) -> Result<EncoderInner> {
         #[cfg(all(feature = "ffmpeg", not(feature = "stub")))]
         {
             // TODO Phase 1.1 : initialisation complète avec ffmpeg-sys-next

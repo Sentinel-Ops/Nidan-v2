@@ -1,6 +1,5 @@
 //! Registre des sessions actives côté broker.
 
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -8,7 +7,6 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use nidan_common::session::SessionId;
 
 /// État d'une session broker
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 pub mod x11;
 #[cfg(feature = "pipewire-capture")]

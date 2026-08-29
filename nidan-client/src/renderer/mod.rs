@@ -8,10 +8,9 @@
 //! - Overlay HUD (métriques, statut connexion)
 //! - Gestion des événements fenêtre (resize, focus, iconify)
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::sync::mpsc;
 use tokio::sync::mpsc as tokio_mpsc;
-use tracing::{debug, info, warn};
 
 use crate::decoder::DecodedFrame;
 use crate::input::InputEvent;

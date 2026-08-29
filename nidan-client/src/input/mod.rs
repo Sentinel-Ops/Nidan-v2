@@ -5,11 +5,10 @@
 
 use anyhow::Result;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use nidan_proto::{
-    InputBatch, InputEvent as ProtoInputEvent,
-    InputEventPayload, KeyEvent, MouseEvent,
+    InputBatch, InputEvent as ProtoInputEvent, KeyEvent, MouseEvent,
 };
 
 /// Événement d'entrée interne (type-safe, avant conversion proto)
