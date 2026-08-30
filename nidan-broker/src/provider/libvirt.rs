@@ -393,7 +393,7 @@ fn clone_volumes(
             Ok(src_vol) => {
                 let vol_xml = format!(
                     "<volume>\n  <name>{new_name}{ext}</name>\n  \
-                     <target><path>{new_path}</path></target>\n</volume>"
+                     <target><path>{new_path}</path><format type='qcow2'/></target>\n</volume>"
                 );
                 StorageVol::create_xml_from(&pool, &vol_xml, &src_vol, 0)
                     .map_err(|e| {

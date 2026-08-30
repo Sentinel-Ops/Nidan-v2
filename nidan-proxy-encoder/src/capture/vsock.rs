@@ -66,6 +66,12 @@ pub struct VsockCapturer {
     /// mono-session par VM (une seule connexion agent active à la fois), la
     /// contention sur ce Mutex est nulle en pratique.
     inputs_rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
+    /// Canaux d'inputs par CID (multi-VM). Quand un client s'enregistre
+    /// pour un CID donné, le receiver est stocké ici. L'agent connecté
+    /// avec ce CID le récupère au lieu du canal partagé.
+    cid_input_rxs: Arc<std::sync::Mutex<std::collections::HashMap<u32, mpsc::Receiver<Vec<u8>>>>>,
+    /// Côté émetteur des canaux per-CID (pour lookup par make_injector).
+    cid_input_txs: Arc<std::sync::Mutex<std::collections::HashMap<u32, mpsc::Sender<Vec<u8>>>>>,
     /// Etape 6c : etat partage des capabilities, rempli a AgentHello.
     shared_caps: Option<Arc<tokio::sync::RwLock<Option<CapturerCapabilities>>>>,
     /// Etape 6c : notifieur reveille quand shared_caps est mis a jour.
@@ -87,6 +93,8 @@ impl VsockCapturer {
             caps,
             inputs_tx,
             inputs_rx: Arc::new(Mutex::new(inputs_rx)),
+            cid_input_rxs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            cid_input_txs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             shared_caps: None,
             caps_notify: None,
         }))
@@ -111,6 +119,8 @@ impl VsockCapturer {
             caps,
             inputs_tx,
             inputs_rx: Arc::new(Mutex::new(inputs_rx)),
+            cid_input_rxs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            cid_input_txs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             shared_caps: Some(shared_caps),
             caps_notify: Some(caps_notify),
         }))
@@ -121,6 +131,31 @@ impl VsockCapturer {
     /// du client. La connexion vsock (établie dans start()) les enverra.
     pub fn inputs_tx(&self) -> mpsc::Sender<Vec<u8>> {
         self.inputs_tx.clone()
+    }
+
+    /// Enregistre un canal d'inputs dédié pour un CID. Le sender est retourné
+    /// à l'appelant (stream/mod.rs), le receiver sera récupéré par l'agent
+    /// quand il se connectera avec ce CID.
+    pub fn register_input_for_cid(&self, cid: u32) -> mpsc::Sender<Vec<u8>> {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
+        self.cid_input_rxs.lock().unwrap().insert(cid, rx);
+        self.cid_input_txs.lock().unwrap().insert(cid, tx.clone());
+        tracing::info!(cid, "canal inputs dédié enregistré pour CID");
+        tx
+    }
+
+    /// Récupère le sender per-CID (pour make_injector).
+    pub fn get_input_tx_for_cid(&self, cid: u32) -> Option<mpsc::Sender<Vec<u8>>> {
+        self.cid_input_txs.lock().unwrap().get(&cid).cloned()
+    }
+
+    /// Accesseur pour le VsockService.
+    pub fn cid_input_rxs(&self) -> Arc<std::sync::Mutex<std::collections::HashMap<u32, mpsc::Receiver<Vec<u8>>>>> {
+        self.cid_input_rxs.clone()
+    }
+
+    pub fn cid_input_txs(&self) -> Arc<std::sync::Mutex<std::collections::HashMap<u32, mpsc::Sender<Vec<u8>>>>> {
+        self.cid_input_txs.clone()
     }
 }
 
@@ -187,7 +222,19 @@ impl Capturer for VsockCapturer {
                         let session_sd = shutdown.clone();
                         let session_caps = self.shared_caps.clone();
                         let session_notify = self.caps_notify.clone();
-                        let session_inputs = inputs_rx;
+                        // Multi-VM : chercher un canal inputs dédié pour ce CID.
+                        // Si un client s'est enregistré pour ce CID, on utilise
+                        // son canal dédié. Sinon, fallback sur le canal partagé.
+                        let session_inputs = {
+                            let mut rxs = self.cid_input_rxs.lock().unwrap();
+                            if let Some(rx) = rxs.remove(&peer_cid) {
+                                tracing::info!(peer_cid, "inputs routés via canal CID dédié");
+                                Arc::new(Mutex::new(rx))
+                            } else {
+                                tracing::debug!(peer_cid, "pas de canal CID dédié — fallback partagé");
+                                inputs_rx
+                            }
+                        };
                         // Multi-agent : chaque connexion agent est gérée dans
                         // sa propre tâche, permettant plusieurs VMs simultanées.
                         tokio::spawn(async move {

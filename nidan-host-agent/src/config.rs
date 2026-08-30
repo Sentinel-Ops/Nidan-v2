@@ -24,6 +24,8 @@ pub struct VsockConfig {
     pub port: u32,
     /// CID autorisé à se connecter (le broker). None = accepter tout.
     pub allowed_cid: Option<u32>,
+    /// CID du proxy-encoder (socle, loopback). Restreint à stop_vm + delete_vm.
+    pub proxy_cid: Option<u32>,
 }
 
 fn default_vsock_port() -> u32 { 6900 }
@@ -33,6 +35,7 @@ impl Default for VsockConfig {
         Self {
             port: default_vsock_port(),
             allowed_cid: None,
+            proxy_cid: None,
         }
     }
 }

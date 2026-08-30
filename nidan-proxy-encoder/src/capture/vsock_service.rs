@@ -72,7 +72,7 @@ const BROADCAST_CHANNEL_SIZE: usize = 8;
 
 /// Étape 6c : délai maximum d'attente qu'un agent se connecte avant de
 /// rejeter une session cliente avec une erreur claire.
-pub const DEFAULT_AGENT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_AGENT_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Le service singleton. Instancié une fois au boot du proxy, réutilisé
 /// par toutes les sessions.
@@ -98,6 +98,11 @@ pub struct VsockService {
     /// Le VsockCapturer les reçoit et les envoie sur le canal vsock au format
     /// AgentMessage::Inputs.
     inputs_tx: mpsc::Sender<Vec<u8>>,
+
+    /// Map partagée avec le VsockCapturer : CID → Receiver d'inputs.
+    /// Permet le routage per-CID des inputs en multi-VM.
+    cid_input_rxs: Arc<std::sync::Mutex<std::collections::HashMap<u32, mpsc::Receiver<Vec<u8>>>>>,
+    cid_input_txs: Arc<std::sync::Mutex<std::collections::HashMap<u32, mpsc::Sender<Vec<u8>>>>>,
 
     /// Token de shutdown global du service (au moment où le proxy s'arrête).
     _shutdown: CancellationToken,
@@ -188,11 +193,16 @@ impl VsockService {
         });
 
         // Construire le service.
+        let cid_input_rxs = capturer.cid_input_rxs();
+        let cid_input_txs = capturer.cid_input_txs();
+
         let service = Arc::new(VsockService {
             agent_caps,
             caps_notify,
             frames_broadcast: broadcast_tx,
             inputs_tx,
+            cid_input_rxs,
+            cid_input_txs,
             _shutdown: shutdown,
             _capturer_handle: cap_handle,
             _fanout_handle: fanout_handle,
@@ -281,6 +291,23 @@ impl VsockService {
     /// entrées reçues du client vers la VM via vsock.
     pub fn inputs_tx(&self) -> mpsc::Sender<Vec<u8>> {
         self.inputs_tx.clone()
+    }
+
+    /// Enregistre un canal d'inputs dédié pour un CID (multi-VM).
+    /// Retourne le sender que la session client utilisera pour envoyer
+    /// ses inputs. Le receiver sera récupéré par l'agent quand il se
+    /// connectera avec ce CID.
+    pub fn register_input_for_cid(&self, cid: u32) -> mpsc::Sender<Vec<u8>> {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
+        self.cid_input_rxs.lock().unwrap().insert(cid, rx);
+        self.cid_input_txs.lock().unwrap().insert(cid, tx.clone());
+        tracing::info!(cid, "canal inputs dédié enregistré");
+        tx
+    }
+
+    /// Récupère le sender d'inputs pour un CID (lookup, pas de création).
+    pub fn get_input_tx_for_cid(&self, cid: u32) -> Option<mpsc::Sender<Vec<u8>>> {
+        self.cid_input_txs.lock().unwrap().get(&cid).cloned()
     }
 
     /// S'abonne au flux de frames pour une nouvelle session cliente.

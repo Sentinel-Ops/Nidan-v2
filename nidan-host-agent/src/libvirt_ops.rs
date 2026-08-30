@@ -237,14 +237,20 @@ fn clone_volumes(conn: &Connect, xml: &str, new_name: &str, pool_name: &str) -> 
         let new_path = format!("{dir}/{new_name}{ext}");
 
         match StorageVol::lookup_by_path(conn, &src_path) {
-            Ok(src_vol) => {
-                let vol_xml = format!(
-                    "<volume>\n  <name>{new_name}{ext}</name>\n  \
-                     <target><path>{new_path}</path></target>\n</volume>"
-                );
-                StorageVol::create_xml_from(&pool, &vol_xml, &src_vol, 0)
-                    .map_err(|e| anyhow::anyhow!("clone {src_path} → {new_path}: {e}"))?;
-                debug!(src = %src_path, dst = %new_path, "volume cloné");
+            Ok(_src_vol) => {
+                // Thin clone : backing file au lieu de copie complète.
+                // Instantané (~0s) au lieu de ~50s pour 16 Go sur HDD.
+                let output = std::process::Command::new("qemu-img")
+                    .args(["create", "-f", "qcow2", "-b", &src_path, "-F", "qcow2", &new_path])
+                    .output()
+                    .map_err(|e| anyhow::anyhow!("qemu-img create: {e}"))?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    anyhow::bail!("thin clone {src_path} → {new_path}: {stderr}");
+                }
+                // Rafraîchir le pool pour que libvirt voie le nouveau volume
+                let _ = pool.refresh(0);
+                debug!(src = %src_path, dst = %new_path, "volume thin-cloné (backing file)");
             }
             Err(e) => warn!(path = %src_path, error = %e, "volume source introuvable"),
         }

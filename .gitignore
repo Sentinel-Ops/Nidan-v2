@@ -12,3 +12,4 @@ Cargo.lock.bak
 *.bak
 .nidan-check-backups/
 .bak-*
+.bak-*

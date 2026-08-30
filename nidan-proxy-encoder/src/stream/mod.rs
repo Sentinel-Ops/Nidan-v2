@@ -119,6 +119,7 @@ impl QuicServer {
         width: u32,
         height: u32,
         _restore_token: Option<String>,
+        session_cid: Option<u32>,
     ) -> anyhow::Result<Injector> {
         match backend {
             #[cfg(feature = "vsock-source")]
@@ -129,7 +130,9 @@ impl QuicServer {
                     ))?;
                 tracing::info!("injection via relais vsock vers l'agent");
                 Ok(Injector::Vsock {
-                    tx: service.inputs_tx(),
+                    tx: session_cid
+                        .and_then(|cid| service.get_input_tx_for_cid(cid))
+                        .unwrap_or_else(|| service.inputs_tx()),
                     count: 0,
                 })
             }
@@ -286,6 +289,7 @@ impl QuicServer {
         // Vérification du jeton de session délivré par le broker (si exigé).
         // Empêche un client de contourner le broker en se connectant directement.
         let mut session_cid: Option<u32> = None;
+        let mut session_vm_id: Option<String> = None;
         if config.security.require_session_token {
             let token = String::from_utf8_lossy(&handshake.session_token);
             match crate::session_token::verify_session_token(&token, &config.security.jwt_secret) {
@@ -296,6 +300,7 @@ impl QuicServer {
                         "jeton de session broker validé"
                     );
                     session_cid = claims.cid;
+                    session_vm_id = Some(claims.vm_id.clone());
                 }
                 Err(e) => {
                     warn!(error = %e, client = %remote, "jeton de session refusé — session rejetée");
@@ -329,6 +334,11 @@ impl QuicServer {
         // texture SDL2 aux mauvaises dimensions.
         if config.capture.backend == "vsock" {
             if let Some(service) = crate::capture::vsock_service::VsockService::get() {
+                // Multi-VM : enregistrer le canal inputs AVANT d'attendre
+                // l'agent. L'agent récupère le rx quand il se connecte.
+                if let Some(cid) = session_cid {
+                    service.register_input_for_cid(cid);
+                }
                 let real_caps = service.wait_for_agent_capabilities(
                     crate::capture::vsock_service::DEFAULT_AGENT_WAIT_TIMEOUT
                 ).await?;
@@ -383,7 +393,71 @@ impl QuicServer {
             .context("envoi handshake ACK")?;
 
         // 3. Démarrage du pipeline capture → encodage → stream
-        Self::run_session(conn, config, display, session_id, handshake, video_cipher, control_cipher, shutdown, session_cid).await
+        Self::run_session(conn, config, display, session_id, handshake, video_cipher, control_cipher, shutdown, session_cid, session_vm_id).await
+    }
+
+    /// Détruit une VM dynamique via le host-agent (vsock loopback CID 1).
+    ///
+    /// Envoie stop_vm puis delete_vm. Best-effort : les erreurs sont loggées
+    /// mais ne bloquent pas la fin de session.
+    #[cfg(feature = "vsock-source")]
+    async fn cleanup_dynamic_vm(vm_id: &str) {
+        use nidan_proto::host_agent::{AgentRequest, AgentResponse, HOST_AGENT_DEFAULT_PORT};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // CID 1 = VMADDR_CID_LOCAL (vsock loopback, même machine)
+        let addr = tokio_vsock::VsockAddr::new(1, HOST_AGENT_DEFAULT_PORT);
+
+        for req in [
+            AgentRequest::StopVm { vm_id: vm_id.to_string() },
+            AgentRequest::DeleteVm { vm_id: vm_id.to_string() },
+        ] {
+            let action_name = match &req {
+                AgentRequest::StopVm { .. } => "stop_vm",
+                AgentRequest::DeleteVm { .. } => "delete_vm",
+                _ => unreachable!(),
+            };
+
+            let mut stream = match tokio_vsock::VsockStream::connect(addr).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e, vm_id, action = action_name,
+                        "cleanup: connexion host-agent impossible"
+                    );
+                    break;
+                }
+            };
+
+            let payload = match serde_json::to_vec(&req) {
+                Ok(p) => p,
+                Err(e) => { tracing::warn!(error = %e, "cleanup: sérialisation"); continue; }
+            };
+            let len = (payload.len() as u32).to_be_bytes();
+
+            if stream.write_all(&len).await.is_err() { continue; }
+            if stream.write_all(&payload).await.is_err() { continue; }
+
+            let mut resp_len = [0u8; 4];
+            if stream.read_exact(&mut resp_len).await.is_err() { continue; }
+            let size = u32::from_be_bytes(resp_len) as usize;
+            if size > 65536 { continue; }
+            let mut buf = vec![0u8; size];
+            if stream.read_exact(&mut buf).await.is_err() { continue; }
+
+            match serde_json::from_slice::<AgentResponse>(&buf) {
+                Ok(r) if r.success => {
+                    tracing::info!(vm_id, action = action_name, "cleanup OK");
+                }
+                Ok(r) => {
+                    tracing::warn!(vm_id, action = action_name,
+                        error = ?r.error, "cleanup échoué");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "cleanup: réponse illisible");
+                }
+            }
+        }
     }
 
     /// Réceptionne le handshake initial du client
@@ -507,6 +581,7 @@ impl QuicServer {
         control_cipher: Option<nidan_common::crypto::StreamCipher>,
         shutdown: tokio_util::sync::CancellationToken,
         session_cid: Option<u32>,
+        session_vm_id: Option<String>,
     ) -> Result<()> {
         let session_shutdown = tokio_util::sync::CancellationToken::new();
 
@@ -626,7 +701,7 @@ impl QuicServer {
             // Choix de l'injecteur selon le backend de capture :
             // - "wayland"/"pipewire" → RemoteDesktop (portail, compatible Wayland)
             // - sinon → XTEST (X11/Xorg)
-            let mut injector = match Self::make_injector(&inj_backend, inj_display, inj_w, inj_h, inj_restore.clone()) {
+            let mut injector = match Self::make_injector(&inj_backend, inj_display, inj_w, inj_h, inj_restore.clone(), session_cid) {
                 Ok(i) => i,
                 Err(e) => { tracing::warn!(error = %e, "injecteur indisponible"); return; }
             };
@@ -776,6 +851,16 @@ impl QuicServer {
         }
 
         session_shutdown.cancel();
+
+        // Destruction immédiate de la VM dynamique à la déconnexion
+        #[cfg(feature = "vsock-source")]
+        if let Some(ref vm_id) = session_vm_id {
+            if vm_id.starts_with("nidan-") && vm_id != "nidan-template" {
+                info!(session_id = %session_id, vm_id, "nettoyage VM dynamique");
+                Self::cleanup_dynamic_vm(vm_id).await;
+            }
+        }
+
         // Le capturer local n'existe qu'en mode non-vsock ; en mode vsock,
         // le VsockService global tourne indépendamment de la session.
         if let Some(handle) = cap_handle_opt {

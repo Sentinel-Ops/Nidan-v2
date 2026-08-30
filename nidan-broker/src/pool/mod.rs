@@ -418,6 +418,44 @@ impl VmPool {
     }
 
     /// Retourne le statut complet du pool
+
+    /// Garbage collector des sessions expirées.
+    ///
+    /// Parcourt les VMs assignées et libère celles dont la session a dépassé
+    /// `max_age_secs` (typiquement `session_token_ttl_secs`). Les VMs dynamiques
+    /// sont détruites via le provider, les VMs statiques sont remises en état
+    /// `Available`.
+    ///
+    /// Appelé périodiquement par une tâche de fond dans `routing`.
+    pub async fn gc_expired_sessions(&self, max_age_secs: u64) {
+        let now = chrono::Utc::now();
+        let mut expired = Vec::new();
+
+        for entry in self.vms.iter() {
+            if let VmState::Assigned { session_id, since } = &entry.state {
+                let age = (now - *since).num_seconds();
+                if age > max_age_secs as i64 {
+                    expired.push((entry.id.clone(), session_id.clone()));
+                }
+            }
+        }
+
+        if expired.is_empty() {
+            return;
+        }
+
+        info!(count = expired.len(), "GC : sessions expirées détectées");
+
+        for (vm_id, session_id) in expired {
+            info!(
+                vm_id = %vm_id,
+                session_id = %session_id,
+                "GC : libération session expirée"
+            );
+            self.release(&vm_id, &session_id).await;
+        }
+    }
+
     pub fn status(&self) -> PoolStatus {
         let total     = self.vms.len();
         let available = self.vms.iter().filter(|e| e.state.is_available()).count();

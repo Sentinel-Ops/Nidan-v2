@@ -13,7 +13,28 @@ use crate::libvirt_ops;
 pub async fn handle_request(
     req: AgentRequest,
     cfg: &HostAgentConfig,
+    peer_cid: u32,
 ) -> AgentResponse {
+    // Restriction proxy : seules stop_vm et delete_vm sont autorisées.
+    // Le proxy est sur le socle (même périmètre de confiance) mais on
+    // applique le principe de moindre privilège.
+    let is_proxy = cfg.vsock.proxy_cid.map_or(false, |c| peer_cid == c);
+    if is_proxy {
+        match &req {
+            AgentRequest::StopVm { .. } | AgentRequest::DeleteVm { .. } => {}
+            _ => {
+                tracing::warn!(
+                    peer_cid,
+                    action = ?std::mem::discriminant(&req),
+                    "opération refusée pour le proxy (stop/delete uniquement)"
+                );
+                return AgentResponse::err(
+                    "opération non autorisée pour le proxy (stop_vm/delete_vm uniquement)"
+                );
+            }
+        }
+    }
+
     let uri = cfg.libvirt.uri.clone();
     let pool_name = cfg.libvirt.storage_pool.clone();
     let prefix = cfg.libvirt.vm_prefix.clone();

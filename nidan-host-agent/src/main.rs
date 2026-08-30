@@ -60,16 +60,15 @@ async fn main() -> Result<()> {
 
         let peer_cid = addr.cid();
 
-        // Vérifier le CID source
-        if let Some(allowed) = cfg.vsock.allowed_cid {
-            if peer_cid != allowed {
-                warn!(
-                    peer_cid = peer_cid,
-                    allowed = allowed,
-                    "connexion refusée : CID non autorisé"
-                );
-                continue;
-            }
+        // Vérifier le CID source : broker (toutes les ops) ou proxy (stop/delete)
+        let is_broker = cfg.vsock.allowed_cid.map_or(true, |c| peer_cid == c);
+        let is_proxy = cfg.vsock.proxy_cid.map_or(false, |c| peer_cid == c);
+        if !is_broker && !is_proxy {
+            warn!(
+                peer_cid = peer_cid,
+                "connexion refusée : CID non autorisé"
+            );
+            continue;
         }
 
         let cfg = cfg.clone();
@@ -118,7 +117,7 @@ async fn handle_connection(
     );
 
     // Dispatch
-    let response = handler::handle_request(request, cfg).await;
+    let response = handler::handle_request(request, cfg, peer_cid).await;
 
     // Sérialiser et envoyer la réponse
     let resp_bytes = serde_json::to_vec(&response)

@@ -52,7 +52,22 @@ impl BrokerState {
             "pool de VMs initialisé"
         );
 
-        Ok(Arc::new(Self { config, pool, sessions, auth }))
+        let state = Arc::new(Self { config, pool, sessions, auth });
+
+        // Tâche de fond : GC des sessions expirées
+        let gc_state = state.clone();
+        let gc_ttl = state.config.auth.session_token_ttl_secs;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(
+                std::time::Duration::from_secs(30)
+            );
+            loop {
+                interval.tick().await;
+                gc_state.pool.gc_expired_sessions(gc_ttl).await;
+            }
+        });
+
+        Ok(state)
     }
 }
 
@@ -252,9 +267,16 @@ async fn handle_client(
                         conn.close(3u32.into(), b"session timeout");
                     }
                 }
-                state_clone.pool.release(&vm_id_clone, &session_id_str).await;
-                state_clone.sessions.close(&session_id_str);
-                info!(session_id = %session_id_str, "session broker fermée");
+                // NOTE : on ne release PAS la VM ici.
+                // La connexion broker est un handshake court — le client
+                // se déconnecte pour se reconnecter au proxy-encoder.
+                // La VM reste assignée et sera libérée par le GC quand
+                // le JWT expire (session_token_ttl_secs).
+                info!(
+                    session_id = %session_id_str,
+                    vm_id = %vm_id_clone,
+                    "handshake broker terminé — VM reste assignée pour la session proxy"
+                );
             });
         }
     }
