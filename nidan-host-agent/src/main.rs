@@ -41,11 +41,15 @@ async fn main() -> Result<()> {
     let cfg = HostAgentConfig::load(&args.config)?;
     cfg.validate()?;
 
-    // Vérifier la connectivité libvirt au démarrage
-    libvirt_ops::check_connectivity(&cfg.libvirt.uri)
-        .context("connexion libvirt initiale")?;
-    info!(uri = %cfg.libvirt.uri, "libvirt connecté");
+    // Connexion libvirt persistante (évite la fuite de FDs GLib)
+    let libvirt_pool = Arc::new(
+        libvirt_ops::LibvirtPool::new(&cfg.libvirt.uri)
+            .context("connexion libvirt initiale")?
+    );
+    info!(uri = %cfg.libvirt.uri, "libvirt connecté (persistant)");
 
+    let mut cfg = cfg;
+    cfg.libvirt_pool = Some(libvirt_pool);
     let cfg = Arc::new(cfg);
 
     // Écoute vsock

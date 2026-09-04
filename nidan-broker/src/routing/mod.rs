@@ -191,7 +191,7 @@ async fn handle_client(
                 Some(request.preferred_vm_tag.as_str())
             };
 
-            let vm = match state.pool.assign_or_provision(session_id.as_ref(), preferred_tag).await {
+            let vm = match state.pool.assign_or_provision(session_id.as_ref(), preferred_tag, &identity.user_id).await {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(error = %e, user = %identity.user_id, "pas de VM disponible");

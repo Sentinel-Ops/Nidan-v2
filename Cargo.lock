@@ -1992,6 +1992,7 @@ name = "nidan-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bytes",
  "chacha20poly1305",
  "clap",

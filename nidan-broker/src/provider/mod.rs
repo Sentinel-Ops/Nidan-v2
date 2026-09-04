@@ -162,7 +162,7 @@ pub fn build_provider(
         }
 
         other => {
-            let supported = vec!["static"];
+            let mut supported = vec!["static"];
             #[cfg(feature = "provider-proxmox")]
             supported.push("proxmox");
             #[cfg(feature = "provider-libvirt")]

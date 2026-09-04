@@ -5,13 +5,14 @@
 
 use std::sync::mpsc;
 
-use anyhow::Result;
-use tracing::info;
+use std::time::Instant;
+use anyhow::{Context, Result};
+use tracing::{info, debug};
 
 use crate::config::DisplayConfig;
 use crate::decoder::DecodedFrame;
 use crate::input::InputEvent;
-use crate::renderer::{ConnectionStatus, RenderMetrics};
+use crate::renderer::{ConnectionStatus, RenderMetrics, ScalingMode, RenderRect};
 
 /// Point d'entrée de la boucle SDL2
 pub fn run_sdl2_loop(
@@ -21,15 +22,17 @@ pub fn run_sdl2_loop(
     frame_rx: mpsc::Receiver<DecodedFrame>,
     input_tx: tokio::sync::mpsc::Sender<InputEvent>,
     metrics_tx: tokio::sync::watch::Sender<RenderMetrics>,
+    expiry_rx: mpsc::Receiver<u32>,
+    exit_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     #[cfg(all(feature = "sdl2-renderer", not(feature = "stub")))]
     {
-        run_sdl2_real(config, initial_width, initial_height, frame_rx, input_tx, metrics_tx)
+        run_sdl2_real(config, initial_width, initial_height, frame_rx, input_tx, metrics_tx, expiry_rx, exit_flag)
     }
 
     #[cfg(any(not(feature = "sdl2-renderer"), feature = "stub"))]
     {
-        run_sdl2_stub(config, initial_width, initial_height, frame_rx, input_tx, metrics_tx)
+        run_sdl2_stub(config, initial_width, initial_height, frame_rx, input_tx, metrics_tx, expiry_rx, exit_flag)
     }
 }
 
@@ -42,6 +45,8 @@ fn run_sdl2_real(
     frame_rx: mpsc::Receiver<DecodedFrame>,
     input_tx: tokio::sync::mpsc::Sender<InputEvent>,
     metrics_tx: tokio::sync::watch::Sender<RenderMetrics>,
+    expiry_rx: mpsc::Receiver<u32>,
+    exit_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     use sdl2::event::Event;
     use sdl2::keyboard::Keycode;
@@ -187,6 +192,20 @@ fn run_sdl2_real(
             }
         }
 
+        // ── Notification expiration JWT ──────────────────────────────────
+        while let Ok(remaining) = expiry_rx.try_recv() {
+            if remaining == 0 {
+                info!("SDL2: session JWT expirée — fermeture automatique");
+                canvas.window_mut().set_title("NIDAN — Session expirée").ok();
+                break 'main;
+            } else {
+                let mins = remaining / 60;
+                let secs = remaining % 60;
+                let title = format!("NIDAN \u{2014} Session expire dans {}:{:02}", mins, secs);
+                canvas.window_mut().set_title(&title).ok();
+            }
+        }
+
         // ── Rendu de la dernière frame disponible ─────────────────────────
         // Drain toutes les frames disponibles, ne garde que la plus récente
         let mut latest_frame: Option<DecodedFrame> = None;
@@ -262,6 +281,11 @@ fn run_sdl2_real(
         }
     }
 
+    // ── Flag de sortie AVANT les destructeurs SDL ──────────────────
+    // SDL_DestroyRenderer / SDL_Quit() peuvent bloquer indéfiniment.
+    // On signale la sortie MAINTENANT, avant que les destructeurs des
+    // variables locales (canvas, texture, sdl_context) ne s'exécutent.
+    exit_flag.store(true, std::sync::atomic::Ordering::Release);
     info!("SDL2 boucle terminée");
     Ok(())
 }
@@ -275,6 +299,8 @@ fn run_sdl2_stub(
     frame_rx: mpsc::Receiver<DecodedFrame>,
     _input_tx: tokio::sync::mpsc::Sender<InputEvent>,
     metrics_tx: tokio::sync::watch::Sender<RenderMetrics>,
+    _expiry_rx: mpsc::Receiver<u32>,
+    exit_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
     info!("renderer stub démarré (SDL2 non disponible)");
     let mut count = 0u64;
@@ -298,6 +324,7 @@ fn run_sdl2_stub(
         }
     }
 
+    exit_flag.store(true, std::sync::atomic::Ordering::Release);
     info!("renderer stub terminé, {} frames affichées", count);
     Ok(())
 }

@@ -298,6 +298,13 @@ impl VsockService {
     /// ses inputs. Le receiver sera récupéré par l'agent quand il se
     /// connectera avec ce CID.
     pub fn register_input_for_cid(&self, cid: u32) -> mpsc::Sender<Vec<u8>> {
+        // Si l'agent s'est connecté avant le client (pool chaud), le canal
+        // existe déjà. Réutiliser le tx pour que le client écrive dans le
+        // même canal que l'agent lit.
+        if let Some(existing_tx) = self.cid_input_txs.lock().unwrap().get(&cid).cloned() {
+            tracing::info!(cid, "canal inputs CID réutilisé (agent déjà connecté)");
+            return existing_tx;
+        }
         let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
         self.cid_input_rxs.lock().unwrap().insert(cid, rx);
         self.cid_input_txs.lock().unwrap().insert(cid, tx.clone());

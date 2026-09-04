@@ -19,6 +19,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -217,12 +218,49 @@ impl NidanClient {
         let (metrics_tx, _metrics_rx)     = tokio::sync::watch::channel(
             renderer::RenderMetrics::default()
         );
+        // Canal de notification d'expiration JWT → thread SDL
+        let (expiry_tx, expiry_rx) = std::sync::mpsc::channel::<u32>();
+
+        // Timer d'expiration JWT : décode le claim "exp" et spawne
+        // un compte à rebours qui notifie le thread SDL.
+        if let Some(exp_ts) = decode_jwt_exp(&session_token) {
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let remaining = (exp_ts - now_ts).max(0) as u64;
+            info!(remaining_secs = remaining, "expiration JWT dans {}s", remaining);
+
+            let etx = expiry_tx.clone();
+            tokio::spawn(async move {
+                // Notification à 120s avant expiration
+                if remaining > 120 {
+                    tokio::time::sleep(Duration::from_secs(remaining - 120)).await;
+                    let _ = etx.send(120);
+                }
+                // Décompte chaque seconde dans les 2 dernières minutes
+                let countdown_start = remaining.min(120);
+                for i in (0..countdown_start).rev() {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let _ = etx.send(i as u32);
+                }
+            });
+        }
+
         let display_cfg = self.config.display.clone();
+        let sdl_shutdown = shutdown.clone();
+        let sdl_exited = Arc::new(AtomicBool::new(false));
+        let sdl_exited_sdl = sdl_exited.clone();
         let _renderer_thread = std::thread::spawn(move || {
-            renderer::sdl::run_sdl2_loop(
+            let result = renderer::sdl::run_sdl2_loop(
                 display_cfg, width, height,
                 frame_rx_sdl, input_tx_sdl, metrics_tx,
-            )
+                expiry_rx,
+                sdl_exited_sdl, // flag positionné DANS run_sdl2_loop, avant destructeurs
+            );
+            // cancel() peut bloquer si SDL_Quit() bloque — le flag est déjà positionné
+            sdl_shutdown.cancel();
+            result
         });
 
         // InputSender : agrège les inputs et les envoie au serveur
@@ -300,11 +338,25 @@ impl NidanClient {
             }
         });
 
+        let mut sdl_check = tokio::time::interval(Duration::from_millis(200));
+
         loop {
+            if sdl_exited.load(Ordering::Acquire) {
+                info!("renderer SDL terminé — fin de session");
+                break;
+            }
+
             tokio::select! {
                 _ = shutdown.cancelled() => {
                     info!("arrêt demandé");
                     break;
+                }
+
+                _ = sdl_check.tick() => {
+                    if sdl_exited.load(Ordering::Acquire) {
+                        info!("renderer SDL terminé — fin de session");
+                        break;
+                    }
                 }
 
                 _ = conn.closed() => {
@@ -337,17 +389,26 @@ impl NidanClient {
                             // — vidéo ET inputs. Le décodage prend déjà
                             // 120-150ms/frame en usage normal (mesuré), donc
                             // un vrai blocage interne est plausible.
-                            match tokio::time::timeout(
-                                std::time::Duration::from_secs(5),
-                                tx_dec_in.send(frame)
-                            ).await {
-                                Ok(Ok(())) => {}
-                                Ok(Err(_)) => break,
-                                Err(_) => {
-                                    error!("timeout (5s) envoi frame au décodeur — \
-                                            décodeur probablement bloqué, fin de session");
-                                    break;
+                            let mut send_ok = false;
+                            for _ in 0..50 {
+                                match tx_dec_in.try_send(frame) {
+                                    Ok(()) => { send_ok = true; break; }
+                                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                                    Err(mpsc::error::TrySendError::Full(returned)) => {
+                                        frame = returned;
+                                        if sdl_exited.load(Ordering::Acquire) { break; }
+                                        tokio::time::sleep(Duration::from_millis(100)).await;
+                                    }
                                 }
+                            }
+                            if sdl_exited.load(Ordering::Acquire) {
+                                info!("renderer SDL terminé — fin de session");
+                                break;
+                            }
+                            if !send_ok {
+                                error!("timeout (5s) envoi frame au décodeur — \
+                                        décodeur probablement bloqué, fin de session");
+                                break;
                             }
                         }
                         None => { warn!("flux vidéo terminé"); break; }
@@ -356,7 +417,10 @@ impl NidanClient {
 
                 // Frame décodée → renderer SDL2
                 Some(decoded) = rx_dec_out.recv() => {
-                    let _ = frame_tx_sdl.try_send(decoded);
+                    if frame_tx_sdl.try_send(decoded).is_err() {
+                        info!("renderer SDL fermé — fin de session");
+                        break;
+                    }
                 }
 
                 // InputBatch → envoi au serveur sur le stream de contrôle
@@ -424,6 +488,8 @@ impl NidanClient {
                 }
             }
         }
+
+        conn.close(0u32.into(), b"client shutdown");
 
         // Arrêt des tâches lectrices
         video_reader.abort();
@@ -678,4 +744,28 @@ impl NidanClient {
         tx.write_all(&framed).await?;
         Ok(())
     }
+}
+
+
+/// Décode le claim `exp` d'un JWT SANS vérifier la signature.
+/// Le JWT a déjà été validé par le proxy — on veut juste l'expiration
+/// pour afficher le compte à rebours côté client.
+fn decode_jwt_exp(token: &[u8]) -> Option<i64> {
+    let token_str = std::str::from_utf8(token).ok()?;
+    let payload_b64 = token_str.split('.').nth(1)?;
+    // base64url → base64 standard
+    let b64: String = payload_b64.chars().map(|ch| match ch {
+        '-' => '+',
+        '_' => '/',
+        ch => ch,
+    }).collect();
+    let padded = match b64.len() % 4 {
+        2 => format!("{}==", b64),
+        3 => format!("{}=", b64),
+        _ => b64,
+    };
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(padded).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v["exp"].as_i64()
 }

@@ -23,6 +23,8 @@ use crate::provider::{VmProvider, StaticProvider};
 pub enum VmState {
     /// Disponible, prête à être assignée
     Available,
+    /// VM chaude, bootée, prête à être assignée instantanément
+    WarmReady { since: DateTime<Utc> },
     /// Assignée à une session
     Assigned { session_id: String, since: DateTime<Utc> },
     /// En cours d'initialisation / warm-up
@@ -40,6 +42,7 @@ impl VmState {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Available     => "disponible",
+            Self::WarmReady{..} => "chaude",
             Self::Assigned{..}  => "assignée",
             Self::Initializing  => "init",
             Self::Unhealthy{..} => "hors service",
@@ -65,6 +68,8 @@ pub struct VmPoolEntry {
     pub provider_id: Option<String>,
     /// CID vsock alloué (VMs dynamiques)
     pub cid:         Option<u32>,
+    /// Utilisateur propriétaire (VMs dynamiques, pour quotas)
+    pub user_id:     Option<String>,
 }
 
 impl VmPoolEntry {
@@ -121,6 +126,11 @@ pub struct VmPool {
     provider: Arc<dyn VmProvider>,
     /// Allocateur de CIDs vsock pour les VMs dynamiques.
     cid_allocator: std::sync::Mutex<CidAllocator>,
+    /// Signal pour déclencher le réapprovisionnement du pool chaud.
+    replenish_notify: Arc<tokio::sync::Notify>,
+    /// VMs détectées comme orphelines, avec leur date de première détection.
+    /// Le GC ne détruit une VM que si elle reste orpheline au-delà du délai de grâce.
+    orphan_candidates: DashMap<String, DateTime<Utc>>,
 }
 
 impl VmPool {
@@ -158,6 +168,8 @@ impl VmPool {
             health_endpoint,
             provider,
             cid_allocator: std::sync::Mutex::new(cid_alloc),
+            replenish_notify: Arc::new(tokio::sync::Notify::new()),
+            orphan_candidates: DashMap::new(),
         });
 
         for vm in &config.static_vms {
@@ -173,6 +185,7 @@ impl VmPool {
                 dynamic:         false,
                 provider_id:     None,
                 cid:             None,
+                user_id:         None,
             };
             info!(vm_id = %vm.id, addr = %entry.addr(), "VM ajoutée au pool");
             pool.vms.insert(vm.id.clone(), entry);
@@ -183,6 +196,22 @@ impl VmPool {
             let pool_clone = pool.clone();
             tokio::spawn(async move {
                 pool_clone.health_check_loop().await;
+            });
+        }
+
+        // Démarrage du pool chaud si dynamic configuré avec min_ready > 0
+        if config.dynamic.as_ref().map(|d| d.min_ready > 0).unwrap_or(false) {
+            let pool_clone = pool.clone();
+            tokio::spawn(async move {
+                pool_clone.replenish_loop().await;
+            });
+        }
+
+        // GC runtime des VMs orphelines
+        if config.dynamic.is_some() {
+            let pool_clone = pool.clone();
+            tokio::spawn(async move {
+                pool_clone.gc_orphan_loop().await;
             });
         }
 
@@ -237,13 +266,48 @@ impl VmPool {
         &self,
         session_id: &str,
         preferred_tag: Option<&str>,
+        user_id: &str,
     ) -> Result<VmPoolEntry> {
         // 1. Tentative statique
         if let Ok(vm) = self.assign(session_id, preferred_tag) {
             return Ok(vm);
         }
 
-        // 2. Provisionnement dynamique
+        // Vérification des quotas (VMs dynamiques uniquement)
+        if let Some(ref dyn_cfg) = self.config.dynamic {
+            let total = self.total_dynamic();
+            if total >= dyn_cfg.max_total as usize {
+                bail!("quota global atteint ({}/{})", total, dyn_cfg.max_total);
+            }
+            let user_count = self.user_dynamic_count(user_id);
+            if user_count >= dyn_cfg.max_per_user as usize {
+                bail!("quota utilisateur atteint ({}/{})", user_count, dyn_cfg.max_per_user);
+            }
+        }
+
+        // 2. Chercher une VM chaude (WarmReady) — assignation instantanée
+        if let Some(warm_id) = self.find_warm_ready() {
+            if let Some(mut entry) = self.vms.get_mut(&warm_id) {
+                entry.state = VmState::Assigned {
+                    session_id: session_id.to_string(),
+                    since: Utc::now(),
+                };
+                entry.sessions_served += 1;
+                entry.user_id = Some(user_id.to_string());
+                let result = entry.clone();
+                info!(
+                    vm_id      = %result.id,
+                    session_id,
+                    addr       = %result.addr(),
+                    "VM chaude assignée (instantané)"
+                );
+                drop(entry);
+                self.trigger_replenish();
+                return Ok(result);
+            }
+        }
+
+        // 3. Provisionnement dynamique (clone à froid)
         let dyn_cfg = self.config.dynamic.as_ref()
             .ok_or_else(|| anyhow::anyhow!(
                 "aucune VM disponible et pool dynamique non configuré"
@@ -316,6 +380,7 @@ impl VmPool {
             dynamic:         true,
             provider_id:     Some(provider_id),
             cid:             Some(cid),
+            user_id:         Some(user_id.to_string()),
         };
 
         info!(
@@ -331,6 +396,393 @@ impl VmPool {
         Ok(result)
     }
 
+
+    // ── Pool chaud ───────────────────────────────────────────────────────
+
+    /// Nombre de VMs en état WarmReady.
+    fn warm_count(&self) -> usize {
+        self.vms.iter()
+            .filter(|e| matches!(e.state, VmState::WarmReady { .. }))
+            .count()
+    }
+
+    /// Nombre de VMs dynamiques assignées à un utilisateur.
+    fn user_dynamic_count(&self, user_id: &str) -> usize {
+        self.vms.iter()
+            .filter(|e| e.dynamic && e.user_id.as_deref() == Some(user_id))
+            .count()
+    }
+
+    /// Nombre total de VMs dynamiques (WarmReady + Assigned).
+    fn total_dynamic(&self) -> usize {
+        self.vms.iter().filter(|e| e.dynamic).count()
+    }
+
+    /// Cherche la VM chaude la plus ancienne.
+    fn find_warm_ready(&self) -> Option<String> {
+        self.vms.iter()
+            .filter(|e| matches!(e.state, VmState::WarmReady { .. }))
+            .min_by_key(|e| match &e.state {
+                VmState::WarmReady { since } => *since,
+                _ => Utc::now(),
+            })
+            .map(|e| e.id.clone())
+    }
+
+    /// Provisionne une VM chaude (clone + cid + start).
+    async fn provision_warm_vm(&self) -> Result<()> {
+        let dyn_cfg = self.config.dynamic.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("pool dynamique non configuré"))?;
+
+        let cid = {
+            let mut alloc = self.cid_allocator.lock()
+                .map_err(|_| anyhow::anyhow!("lock CidAllocator poisonné"))?;
+            alloc.allocate()
+                .ok_or_else(|| anyhow::anyhow!("plage CID épuisée (warm)"))?
+        };
+
+        info!(
+            template = %dyn_cfg.template,
+            cid = cid,
+            "provisionnement VM chaude"
+        );
+
+        let new_vm = match self.provider.clone_vm(&dyn_cfg.template, "").await {
+            Ok(vm) => vm,
+            Err(e) => {
+                if let Ok(mut alloc) = self.cid_allocator.lock() {
+                    alloc.release(cid);
+                }
+                return Err(e.context("clone template (warm)"));
+            }
+        };
+        let provider_id = new_vm.provider_id.clone();
+        let vm_name = new_vm.name.clone().unwrap_or_else(|| format!("warm-{cid}"));
+
+        if let Err(e) = self.provider.set_vsock_cid(&provider_id, cid).await {
+            warn!(error = %e, cid = cid, "set_vsock_cid échoué (warm) — continue");
+        }
+
+        if let Err(e) = self.provider.start_vm(&provider_id).await {
+            warn!(error = %e, "start VM chaude échoué — suppression");
+            let _ = self.provider.delete_vm(&provider_id).await;
+            if let Ok(mut alloc) = self.cid_allocator.lock() {
+                alloc.release(cid);
+            }
+            return Err(e.context("démarrage VM chaude"));
+        }
+
+        let host = dyn_cfg.vm_ip_pattern.replace("{cid}", &cid.to_string());
+
+        let entry = VmPoolEntry {
+            id:              vm_name.clone(),
+            host,
+            port:            dyn_cfg.vm_port,
+            tags:            vec!["dynamic".to_string()],
+            state:           VmState::WarmReady { since: Utc::now() },
+            added_at:        Utc::now(),
+            last_health:     None,
+            sessions_served: 0,
+            dynamic:         true,
+            provider_id:     Some(provider_id),
+            cid:             Some(cid),
+            user_id:         None,
+        };
+
+        info!(
+            vm_id = %entry.id,
+            cid   = cid,
+            addr  = %entry.addr(),
+            "VM chaude prête"
+        );
+        self.vms.insert(vm_name, entry);
+        Ok(())
+    }
+
+    /// Réapprovisionne le pool chaud jusqu'à `min_ready` VMs WarmReady.
+    async fn replenish(&self) {
+        let dyn_cfg = match self.config.dynamic.as_ref() {
+            Some(c) => c,
+            None => return,
+        };
+
+        let min_ready = dyn_cfg.min_ready as usize;
+        let max_total = dyn_cfg.max_total as usize;
+
+        loop {
+            let warm  = self.warm_count();
+            let total = self.total_dynamic();
+
+            if warm >= min_ready {
+                debug!(warm, min_ready, "pool chaud : niveau atteint");
+                break;
+            }
+            if total >= max_total {
+                warn!(total, max_total, "pool chaud : limite max_total atteinte");
+                break;
+            }
+
+            info!(
+                warm, min_ready, total, max_total,
+                "pool chaud : provisionnement"
+            );
+
+            if let Err(e) = self.provision_warm_vm().await {
+                warn!(error = %e, "replenish : échec — arrêt provisoire");
+                break;
+            }
+        }
+    }
+
+    /// Boucle de fond : attend un signal ou un timer pour réapprovisionner.
+    async fn replenish_loop(&self) {
+        // skip_grace=true : au boot, aucun provisionnement en cours,
+        // les orphelines sont des VMs d'un crash précédent → destruction immédiate.
+        info!("replenish : nettoyage initial des orphelines (sans grâce)");
+        self.cleanup_orphans(true).await;
+
+        // Réapprovisionnement initial au démarrage
+        self.replenish().await;
+
+        loop {
+            tokio::select! {
+                _ = self.replenish_notify.notified() => {
+                    debug!("replenish déclenché par signal");
+                }
+                _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                    debug!("replenish périodique");
+                }
+            }
+            self.replenish().await;
+        }
+    }
+
+    /// Déclenche un réapprovisionnement en arrière-plan.
+    fn trigger_replenish(&self) {
+        self.replenish_notify.notify_one();
+    }
+
+    // ── GC orphelines (runtime) ──────────────────────────────────────────
+
+    /// Détecte et détruit les VMs orphelines sur l'hyperviseur.
+    ///
+    /// Compare les VMs réelles (via `provider.list_vms()`) aux VMs connues
+    /// du pool. Celles qui existent sur l'hyperviseur mais pas dans le pool
+    /// sont des orphelines (échec `delete_vm`, crash broker…).
+    ///
+    /// Un **délai de grâce** (`orphan_grace_secs`) empêche la destruction
+    /// de VMs en cours de provisionnement (race condition avec `provision_warm_vm`
+    /// ou `assign_or_provision`).
+    pub async fn cleanup_orphans(&self, skip_grace: bool) -> usize {
+        let dyn_cfg = match self.config.dynamic.as_ref() {
+            Some(c) => c,
+            None => return 0,
+        };
+
+        // 1. Lister les VMs réelles sur l'hyperviseur
+        let real_vms = match self.provider.list_vms().await {
+            Ok(vms) => vms,
+            Err(e) => {
+                warn!(error = %e, "GC orphelines : list_vms échoué");
+                return 0;
+            }
+        };
+
+        // 2. Identifier les VMs connues du pool (par provider_id)
+        let known_pids: std::collections::HashSet<String> = self.vms.iter()
+            .filter_map(|e| e.provider_id.clone())
+            .collect();
+
+        // 3. Filtrer : orpheline = sur l'hyperviseur, pas dans le pool,
+        //    pas le template, pas une VM protégée
+        let template = &dyn_cfg.template;
+        let protected = &dyn_cfg.protected_vms;
+        let orphans: Vec<_> = real_vms.into_iter()
+            .filter(|vm| {
+                let name = vm.name.as_deref().unwrap_or("");
+                // Exclure le template (par nom ou provider_id)
+                if name == template || vm.provider_id == *template {
+                    return false;
+                }
+                // Exclure les VMs protégées (broker, target, infra…)
+                if protected.iter().any(|p| name == p) {
+                    return false;
+                }
+                // Exclure les VMs connues du pool
+                !known_pids.contains(&vm.provider_id)
+            })
+            .collect();
+
+        if orphans.is_empty() {
+            // Purger les candidats obsolètes
+            self.orphan_candidates.clear();
+            return 0;
+        }
+
+        // 4. Appliquer le délai de grâce
+        let now = Utc::now();
+        // Nettoyer les candidats qui ne sont plus orphelins
+        let orphan_pids: std::collections::HashSet<_> = orphans.iter()
+            .map(|o| o.provider_id.clone())
+            .collect();
+        self.orphan_candidates.retain(|pid, _| orphan_pids.contains(pid));
+
+        let mut destroyed = 0usize;
+
+        for vm in &orphans {
+            // Enregistrer ou récupérer la première détection
+            let first_seen = *self.orphan_candidates
+                .entry(vm.provider_id.clone())
+                .or_insert(now);
+
+            let age = (now - first_seen).num_seconds();
+
+            if !skip_grace && age < dyn_cfg.orphan_grace_secs as i64 {
+                debug!(
+                    vm_name = ?vm.name,
+                    provider_id = %vm.provider_id,
+                    age_secs = age,
+                    grace_secs = dyn_cfg.orphan_grace_secs,
+                    "GC orphelines : en délai de grâce"
+                );
+                continue;
+            }
+
+            // Grâce expirée → destruction
+            info!(
+                vm_name = ?vm.name,
+                provider_id = %vm.provider_id,
+                age_secs = age,
+                "GC orphelines : destruction VM orpheline"
+            );
+
+            // Arrêt si running (best-effort)
+            if matches!(vm.status, crate::provider::ProviderVmStatus::Running) {
+                if let Err(e) = self.provider.stop_vm(&vm.provider_id).await {
+                    debug!(
+                        error = %e,
+                        "GC orphelines : stop échoué — tentative delete"
+                    );
+                }
+            }
+
+            // Suppression
+            match self.provider.delete_vm(&vm.provider_id).await {
+                Ok(_) => {
+                    destroyed += 1;
+                    self.orphan_candidates.remove(&vm.provider_id);
+                    info!(vm_name = ?vm.name, "GC orphelines : VM détruite");
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        vm_name = ?vm.name,
+                        "GC orphelines : delete échoué — réessai au prochain cycle"
+                    );
+                }
+            }
+        }
+
+        if destroyed > 0 {
+            info!(destroyed, "GC orphelines : cycle terminé");
+        }
+
+        destroyed
+    }
+
+    /// Boucle de fond du GC orphelines.
+    ///
+    /// Tourne à intervalle régulier (`gc_orphan_interval_secs`). Le premier
+    /// tick fait office de nettoyage au boot (détruit les orphelines d'un
+    /// crash précédent une fois le délai de grâce écoulé).
+    async fn gc_orphan_loop(&self) {
+        let interval = match self.config.dynamic.as_ref() {
+            Some(c) => Duration::from_secs(c.gc_orphan_interval_secs),
+            None => return,
+        };
+
+        info!(
+            interval_secs = interval.as_secs(),
+            "GC orphelines : boucle démarrée"
+        );
+
+        loop {
+            tokio::time::sleep(interval).await;
+            self.cleanup_orphans(false).await;
+            self.gc_stale_sessions().await;
+        }
+    }
+
+    // ── GC sessions obsolètes ────────────────────────────────────────────
+
+    /// Détecte les sessions dont la VM n'existe plus sur l'hyperviseur.
+    ///
+    /// Cas couverts :
+    /// - Le proxy-encoder a détruit la VM (client déconnecté)
+    /// - La VM a crashé
+    /// - Suppression manuelle (virsh destroy/undefine)
+    ///
+    /// Pour chaque VM du pool qui n'existe plus sur l'hyperviseur :
+    /// libère le CID, retire du pool, décrémente les quotas.
+    async fn gc_stale_sessions(&self) {
+        let dyn_cfg = match self.config.dynamic.as_ref() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // Lister les VMs réelles sur l'hyperviseur
+        let real_vms = match self.provider.list_vms().await {
+            Ok(vms) => vms,
+            Err(e) => {
+                debug!(error = %e, "GC stale : list_vms échoué");
+                return;
+            }
+        };
+
+        // Collecter les provider_ids des VMs réelles
+        let real_pids: std::collections::HashSet<String> = real_vms.iter()
+            .map(|v| v.provider_id.clone())
+            .collect();
+
+        // Trouver les VMs dynamiques du pool qui n'existent plus
+        let mut stale: Vec<(String, Option<u32>)> = Vec::new();
+        for entry in self.vms.iter() {
+            if !entry.dynamic { continue; }
+            if let Some(ref pid) = entry.provider_id {
+                if !real_pids.contains(pid) {
+                    stale.push((entry.id.clone(), entry.cid));
+                }
+            }
+        }
+
+        if stale.is_empty() { return; }
+
+        for (vm_id, cid) in &stale {
+            info!(
+                vm_id = %vm_id,
+                cid = ?cid,
+                "GC stale : VM absente de l'hyperviseur — libération"
+            );
+
+            // Libérer le CID vsock
+            if let Some(cid) = cid {
+                if let Ok(mut alloc) = self.cid_allocator.lock() {
+                    alloc.release(*cid);
+                }
+            }
+
+            // Retirer du pool
+            self.vms.remove(vm_id.as_str());
+        }
+
+        info!(
+            count = stale.len(),
+            "GC stale : sessions obsolètes libérées"
+        );
+
+        // Réapprovisionner le pool chaud
+        self.trigger_replenish();
+    }
     /// Libère une VM après la fin d'une session.
     ///
     /// - **VMs statiques** : remise en état `Available` pour réutilisation.
@@ -397,6 +849,9 @@ impl VmPool {
             // Retirer du pool
             self.vms.remove(vm_id);
             info!(vm_id = %vm_id, session_id, "VM dynamique détruite et retirée du pool");
+
+            // Réapprovisionner le pool chaud
+            self.trigger_replenish();
         } else {
             // ── VM statique : remise en état Available ──
             if let Some(mut entry) = self.vms.get_mut(vm_id) {
@@ -454,6 +909,9 @@ impl VmPool {
             );
             self.release(&vm_id, &session_id).await;
         }
+
+        // Réapprovisionner (on arrive ici seulement si expired non vide)
+        self.trigger_replenish();
     }
 
     pub fn status(&self) -> PoolStatus {

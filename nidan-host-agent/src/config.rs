@@ -14,6 +14,9 @@ pub struct HostAgentConfig {
     /// Configuration de sécurité.
     #[serde(default)]
     pub security: SecurityConfig,
+    /// Connexion libvirt persistante (initialisée dans main.rs, pas dans le TOML).
+    #[serde(skip)]
+    pub libvirt_pool: Option<std::sync::Arc<crate::libvirt_ops::LibvirtPool>>,
 }
 
 /// Transport vsock.

@@ -147,12 +147,44 @@ pub struct DynamicPoolConfig {
     /// `{cid}` sera remplacé par le CID alloué.
     #[serde(default = "default_vm_ip_pattern")]
     pub vm_ip_pattern: String,
+    /// Nombre de VMs chaudes à maintenir prêtes (pool chaud)
+    #[serde(default = "default_min_ready")]
+    pub min_ready: u32,
+    /// Nombre maximum de VMs dynamiques simultanées
+    #[serde(default = "default_max_total")]
+    pub max_total: u32,
+    /// Timeout d'attente du boot d'une VM chaude (secondes)
+    #[serde(default = "default_boot_timeout")]
+    pub boot_timeout_secs: u64,
+    /// Intervalle du GC des VMs orphelines (secondes)
+    #[serde(default = "default_gc_orphan_interval")]
+    pub gc_orphan_interval_secs: u64,
+    /// Délai de grâce avant destruction d'une VM orpheline (secondes).
+    /// Doit être > boot_timeout_secs pour éviter de détruire une VM en cours
+    /// de provisionnement.
+    #[serde(default = "default_orphan_grace")]
+    pub orphan_grace_secs: u64,
+    /// Nombre maximum de VMs dynamiques simultanées par utilisateur
+    #[serde(default = "default_max_per_user")]
+    pub max_per_user: u32,
+    /// VMs à ne jamais détruire par le GC orphelines.
+    /// Noms exacts des domaines libvirt d'infrastructure
+    /// (broker, target, monitoring…) qui portent le préfixe
+    /// NIDAN mais ne sont pas gérées par le pool.
+    #[serde(default)]
+    pub protected_vms: Vec<String>,
 }
 
 fn default_vm_port()       -> u16    { 7444 }
 fn default_cid_start()     -> u32    { 10 }
 fn default_cid_end()       -> u32    { 99 }
 fn default_vm_ip_pattern() -> String { "192.168.122.{cid}".to_string() }
+fn default_min_ready()     -> u32    { 3 }
+fn default_max_total()     -> u32    { 10 }
+fn default_boot_timeout()  -> u64    { 120 }
+fn default_gc_orphan_interval() -> u64 { 60 }
+fn default_orphan_grace()       -> u64 { 180 }  // > boot_timeout (120)
+fn default_max_per_user()       -> u32 { 3 }
 
 /// Entrée de VM dans la configuration statique
 #[derive(Debug, Clone, Serialize, Deserialize)]

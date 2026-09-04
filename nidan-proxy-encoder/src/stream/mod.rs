@@ -852,6 +852,12 @@ impl QuicServer {
 
         session_shutdown.cancel();
 
+        // Fermer la connexion QUIC client explicitement.
+        // Sans cela, le client reste connecté avec un écran figé
+        // quand la VM est détruite par le GC broker.
+        conn.close(0u32.into(), b"session ended");
+        info!(session_id = %session_id, "connexion client fermée");
+
         // Destruction immédiate de la VM dynamique à la déconnexion
         #[cfg(feature = "vsock-source")]
         if let Some(ref vm_id) = session_vm_id {

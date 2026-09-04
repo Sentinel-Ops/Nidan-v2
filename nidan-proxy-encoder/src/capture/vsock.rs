@@ -137,6 +137,12 @@ impl VsockCapturer {
     /// à l'appelant (stream/mod.rs), le receiver sera récupéré par l'agent
     /// quand il se connectera avec ce CID.
     pub fn register_input_for_cid(&self, cid: u32) -> mpsc::Sender<Vec<u8>> {
+        // Si l'agent s'est connecté avant le client, le canal existe déjà
+        // (créé par l'auto-enregistrement). Réutiliser le tx existant.
+        if let Some(existing_tx) = self.cid_input_txs.lock().unwrap().get(&cid).cloned() {
+            tracing::info!(cid, "canal inputs CID réutilisé (agent déjà connecté)");
+            return existing_tx;
+        }
         let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
         self.cid_input_rxs.lock().unwrap().insert(cid, rx);
         self.cid_input_txs.lock().unwrap().insert(cid, tx.clone());
@@ -231,8 +237,13 @@ impl Capturer for VsockCapturer {
                                 tracing::info!(peer_cid, "inputs routés via canal CID dédié");
                                 Arc::new(Mutex::new(rx))
                             } else {
-                                tracing::debug!(peer_cid, "pas de canal CID dédié — fallback partagé");
-                                inputs_rx
+                                // Pool chaud : l'agent se connecte AVANT que le client
+                                // ne s'enregistre. Créer le canal maintenant — le client
+                                // le trouvera via get_input_tx_for_cid() plus tard.
+                                let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
+                                self.cid_input_txs.lock().unwrap().insert(peer_cid, tx);
+                                tracing::info!(peer_cid, "canal CID auto-enregistré (agent connecté avant le client)");
+                                Arc::new(Mutex::new(rx))
                             }
                         };
                         // Multi-agent : chaque connexion agent est gérée dans

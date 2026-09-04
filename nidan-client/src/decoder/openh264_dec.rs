@@ -12,6 +12,8 @@ use super::DecoderCodec;
 use openh264::decoder::Decoder;
 #[cfg(feature = "openh264")]
 use openh264::formats::YUVSource;
+use anyhow::Context;
+use tracing::info;
 
 /// Décodeur H.264 openh264
 pub struct Openh264Decoder {

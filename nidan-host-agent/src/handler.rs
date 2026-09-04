@@ -35,7 +35,7 @@ pub async fn handle_request(
         }
     }
 
-    let uri = cfg.libvirt.uri.clone();
+    let pool = cfg.libvirt_pool.clone().expect("LibvirtPool non initialisé");
     let pool_name = cfg.libvirt.storage_pool.clone();
     let prefix = cfg.libvirt.vm_prefix.clone();
 
@@ -45,7 +45,7 @@ pub async fn handle_request(
     }
 
     tokio::task::spawn_blocking(move || {
-        dispatch(req, &uri, &pool_name, &prefix)
+        dispatch(req, &pool, &pool_name, &prefix)
     })
     .await
     .unwrap_or_else(|e| AgentResponse::err(format!("task panic: {e}")))
@@ -78,13 +78,13 @@ fn validate_prefix(req: &AgentRequest, prefix: &str) -> Result<(), AgentResponse
 /// Dispatch synchrone des opérations (exécuté dans spawn_blocking).
 fn dispatch(
     req: AgentRequest,
-    uri: &str,
+    pool: &std::sync::Arc<libvirt_ops::LibvirtPool>,
     storage_pool: &str,
     vm_prefix: &str,
 ) -> AgentResponse {
     match req {
         AgentRequest::ListVms { prefix } => {
-            match libvirt_ops::list_vms(uri, &prefix) {
+            match libvirt_ops::list_vms(pool, &prefix) {
                 Ok(vms) => {
                     info!(count = vms.len(), "list_vms OK");
                     AgentResponse::ok_with(&vms)
@@ -95,7 +95,7 @@ fn dispatch(
         }
 
         AgentRequest::GetStatus { vm_id } => {
-            match libvirt_ops::get_status(uri, &vm_id, vm_prefix) {
+            match libvirt_ops::get_status(pool, &vm_id, vm_prefix) {
                 Ok(vm) => {
                     info!(vm = %vm.name, status = %vm.status, "get_status OK");
                     AgentResponse::ok_with(&vm)
@@ -106,7 +106,7 @@ fn dispatch(
         }
 
         AgentRequest::CloneVm { template, new_name } => {
-            match libvirt_ops::clone_vm(uri, &template, &new_name, storage_pool, vm_prefix) {
+            match libvirt_ops::clone_vm(pool, &template, &new_name, storage_pool, vm_prefix) {
                 Ok(vm) => {
                     info!(name = %vm.name, "clone_vm OK");
                     AgentResponse::ok_with(&vm)
@@ -117,7 +117,7 @@ fn dispatch(
         }
 
         AgentRequest::StartVm { vm_id } => {
-            match libvirt_ops::start_vm(uri, &vm_id, vm_prefix) {
+            match libvirt_ops::start_vm(pool, &vm_id, vm_prefix) {
                 Ok(()) => {
                     info!(vm_id = %vm_id, "start_vm OK");
                     AgentResponse::ok_empty()
@@ -127,7 +127,7 @@ fn dispatch(
         }
 
         AgentRequest::StopVm { vm_id } => {
-            match libvirt_ops::stop_vm(uri, &vm_id, vm_prefix) {
+            match libvirt_ops::stop_vm(pool, &vm_id, vm_prefix) {
                 Ok(()) => {
                     info!(vm_id = %vm_id, "stop_vm OK");
                     AgentResponse::ok_empty()
@@ -137,7 +137,7 @@ fn dispatch(
         }
 
         AgentRequest::DeleteVm { vm_id } => {
-            match libvirt_ops::delete_vm(uri, &vm_id, vm_prefix) {
+            match libvirt_ops::delete_vm(pool, &vm_id, vm_prefix) {
                 Ok(()) => {
                     info!(vm_id = %vm_id, "delete_vm OK");
                     AgentResponse::ok_empty()
@@ -147,7 +147,7 @@ fn dispatch(
         }
 
         AgentRequest::SetVsockCid { vm_id, cid } => {
-            match libvirt_ops::set_vsock_cid(uri, &vm_id, cid, vm_prefix) {
+            match libvirt_ops::set_vsock_cid(pool, &vm_id, cid, vm_prefix) {
                 Ok(()) => {
                     info!(vm_id = %vm_id, cid = cid, "set_vsock_cid OK");
                     AgentResponse::ok_empty()

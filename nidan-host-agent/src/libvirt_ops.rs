@@ -1,7 +1,8 @@
 //! Opérations libvirt pour le nidan-host-agent.
 //!
-//! Chaque fonction ouvre une connexion libvirt, exécute l'opération,
-//! et retourne un `AgentVm` ou `()`. Les fonctions sont synchrones
+//! Connexion persistante : un `LibvirtPool` maintient une connexion
+//! libvirt réutilisée par toutes les opérations, avec reconnexion
+//! automatique si elle tombe. Les fonctions sont synchrones
 //! (appelées depuis `spawn_blocking` dans le handler).
 
 use anyhow::{bail, Result};
@@ -12,20 +13,53 @@ use virt::domain::Domain;
 use virt::storage_pool::StoragePool;
 use virt::storage_vol::StorageVol;
 
-// ── Connexion ───────────────────────────────────────────────────────────────
+// ── Connexion persistante ──────────────────────────────────────────────────
 
-fn open(uri: &str) -> Result<Connect> {
-    Connect::open(Some(uri))
-        .map_err(|e| anyhow::anyhow!("connexion libvirt ({uri}): {e}"))
+/// Pool de connexion libvirt persistante avec reconnexion automatique.
+pub struct LibvirtPool {
+    uri: String,
+    conn: std::sync::Mutex<Option<Connect>>,
 }
 
-/// Vérifie la connectivité libvirt (appelé au démarrage).
-pub fn check_connectivity(uri: &str) -> Result<()> {
-    let conn = open(uri)?;
-    let hv = conn.get_type()
-        .map_err(|e| anyhow::anyhow!("get_type: {e}"))?;
-    info!(hypervisor = %hv, "connectivité libvirt vérifiée");
-    Ok(())
+impl std::fmt::Debug for LibvirtPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LibvirtPool").field("uri", &self.uri).finish()
+    }
+}
+
+impl LibvirtPool {
+    /// Crée le pool, ouvre la connexion et vérifie la connectivité.
+    pub fn new(uri: &str) -> Result<Self> {
+        let conn = Connect::open(Some(uri))
+            .map_err(|e| anyhow::anyhow!("connexion libvirt ({uri}): {e}"))?;
+        let hv = conn.get_type()
+            .map_err(|e| anyhow::anyhow!("get_type: {e}"))?;
+        info!(hypervisor = %hv, "connectivité libvirt vérifiée (persistante)");
+        Ok(Self {
+            uri: uri.to_string(),
+            conn: std::sync::Mutex::new(Some(conn)),
+        })
+    }
+
+    /// Exécute une opération avec la connexion, reconnecte si nécessaire.
+    pub fn with_conn<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connect) -> Result<T>,
+    {
+        let mut guard = self.conn.lock()
+            .map_err(|_| anyhow::anyhow!("lock connexion libvirt poisonné"))?;
+        let alive = guard.as_ref()
+            .map(|c| c.is_alive().unwrap_or(false))
+            .unwrap_or(false);
+        if !alive {
+            info!("reconnexion libvirt");
+            let new_conn = Connect::open(Some(&self.uri))
+                .map_err(|e| anyhow::anyhow!("reconnexion libvirt: {e}"))?;
+            *guard = Some(new_conn);
+        }
+        let conn = guard.as_ref().unwrap();
+        f(conn)
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -63,8 +97,8 @@ fn domain_to_agent_vm(dom: &Domain) -> Result<AgentVm> {
 
 // ── Opérations ──────────────────────────────────────────────────────────────
 
-pub fn list_vms(uri: &str, prefix: &str) -> Result<Vec<AgentVm>> {
-    let conn = open(uri)?;
+pub fn list_vms(pool: &LibvirtPool, prefix: &str) -> Result<Vec<AgentVm>> {
+    pool.with_conn(|conn| {
     let domains = conn.list_all_domains(0)
         .map_err(|e| anyhow::anyhow!("list_all_domains: {e}"))?;
 
@@ -80,22 +114,24 @@ pub fn list_vms(uri: &str, prefix: &str) -> Result<Vec<AgentVm>> {
         }
     }
     Ok(vms)
+    })
 }
 
-pub fn get_status(uri: &str, vm_id: &str, prefix: &str) -> Result<AgentVm> {
-    let conn = open(uri)?;
+pub fn get_status(pool: &LibvirtPool, vm_id: &str, prefix: &str) -> Result<AgentVm> {
+    pool.with_conn(|conn| {
     let dom = lookup_and_verify(&conn, vm_id, prefix)?;
     domain_to_agent_vm(&dom)
+    })
 }
 
 pub fn clone_vm(
-    uri: &str,
+    pool: &LibvirtPool,
     template: &str,
     new_name: &str,
     storage_pool: &str,
     prefix: &str,
 ) -> Result<AgentVm> {
-    let conn = open(uri)?;
+    pool.with_conn(|conn| {
 
     // Résoudre le template
     let tmpl = lookup_and_verify(&conn, template, prefix)?;
@@ -133,18 +169,20 @@ pub fn clone_vm(
 
     info!(template = %template, clone = %name, "VM clonée");
     domain_to_agent_vm(&new_dom)
+    })
 }
 
-pub fn start_vm(uri: &str, vm_id: &str, prefix: &str) -> Result<()> {
-    let conn = open(uri)?;
+pub fn start_vm(pool: &LibvirtPool, vm_id: &str, prefix: &str) -> Result<()> {
+    pool.with_conn(|conn| {
     let dom = lookup_and_verify(&conn, vm_id, prefix)?;
     dom.create()
         .map_err(|e| anyhow::anyhow!("start {vm_id}: {e}"))?;
     Ok(())
+    })
 }
 
-pub fn stop_vm(uri: &str, vm_id: &str, prefix: &str) -> Result<()> {
-    let conn = open(uri)?;
+pub fn stop_vm(pool: &LibvirtPool, vm_id: &str, prefix: &str) -> Result<()> {
+    pool.with_conn(|conn| {
     let dom = lookup_and_verify(&conn, vm_id, prefix)?;
     match dom.shutdown() {
         Ok(_) => info!(vm_id = %vm_id, "shutdown initié"),
@@ -155,10 +193,11 @@ pub fn stop_vm(uri: &str, vm_id: &str, prefix: &str) -> Result<()> {
         }
     }
     Ok(())
+    })
 }
 
-pub fn delete_vm(uri: &str, vm_id: &str, prefix: &str) -> Result<()> {
-    let conn = open(uri)?;
+pub fn delete_vm(pool: &LibvirtPool, vm_id: &str, prefix: &str) -> Result<()> {
+    pool.with_conn(|conn| {
     let dom = lookup_and_verify(&conn, vm_id, prefix)?;
 
     // Arrêter si active
@@ -185,10 +224,11 @@ pub fn delete_vm(uri: &str, vm_id: &str, prefix: &str) -> Result<()> {
     dom.undefine()
         .map_err(|e| anyhow::anyhow!("undefine {vm_id}: {e}"))?;
     Ok(())
+    })
 }
 
-pub fn set_vsock_cid(uri: &str, vm_id: &str, cid: u32, prefix: &str) -> Result<()> {
-    let conn = open(uri)?;
+pub fn set_vsock_cid(pool: &LibvirtPool, vm_id: &str, cid: u32, prefix: &str) -> Result<()> {
+    pool.with_conn(|conn| {
     let dom = lookup_and_verify(&conn, vm_id, prefix)?;
 
     let xml = dom.get_xml_desc(0)
@@ -198,6 +238,7 @@ pub fn set_vsock_cid(uri: &str, vm_id: &str, cid: u32, prefix: &str) -> Result<(
     Domain::define_xml(&conn, &new_xml)
         .map_err(|e| anyhow::anyhow!("redefine vsock: {e}"))?;
     Ok(())
+    })
 }
 
 // ── Helpers XML ─────────────────────────────────────────────────────────────
