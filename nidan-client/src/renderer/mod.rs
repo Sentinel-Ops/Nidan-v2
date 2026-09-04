@@ -145,11 +145,9 @@ pub fn start_renderer(
     let (frame_tx, frame_rx) = mpsc::sync_channel::<DecodedFrame>(1);
     let (input_tx, input_rx) = tokio_mpsc::channel::<InputEvent>(256);
     let (metrics_tx, metrics_rx) = tokio::sync::watch::channel(RenderMetrics::default());
-    let (_expiry_tx, expiry_rx) = std::sync::mpsc::channel::<u32>();   //AJOUT
-    let exit_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let exit_flag_clone = exit_flag.clone();
+
     let thread = std::thread::spawn(move || {
-        sdl::run_sdl2_loop(config, initial_width, initial_height, frame_rx, input_tx, metrics_tx, expiry_rx, exit_flag_clone)
+        sdl::run_sdl2_loop(config, initial_width, initial_height, frame_rx, input_tx, metrics_tx)
     });
 
     Ok((frame_tx, input_rx, metrics_rx, thread))
