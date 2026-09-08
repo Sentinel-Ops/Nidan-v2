@@ -246,6 +246,8 @@ impl Capturer for VsockCapturer {
                                 Arc::new(Mutex::new(rx))
                             }
                         };
+                        // Récupérer le notifieur de déconnexion pour ce CID.
+                        let disconnect_cid = peer_cid;
                         // Multi-agent : chaque connexion agent est gérée dans
                         // sa propre tâche, permettant plusieurs VMs simultanées.
                         tokio::spawn(async move {
@@ -263,6 +265,12 @@ impl Capturer for VsockCapturer {
                                 warn!(error = %e, peer_cid, "session agent terminée avec erreur");
                             }
                             info!(peer_cid, "VsockCapturer : session agent terminée");
+                            // Signaler la déconnexion de l'agent pour ce CID.
+                            // La session QUIC correspondante verra ce signal
+                            // et fermera la connexion client.
+                            if let Some(service) = crate::capture::vsock_service::VsockService::get() {
+                                service.notify_agent_disconnect(disconnect_cid);
+                            }
                         });
                     }
                 }

@@ -104,6 +104,11 @@ pub struct VsockService {
     cid_input_rxs: Arc<std::sync::Mutex<std::collections::HashMap<u32, mpsc::Receiver<Vec<u8>>>>>,
     cid_input_txs: Arc<std::sync::Mutex<std::collections::HashMap<u32, mpsc::Sender<Vec<u8>>>>>,
 
+    /// Tokens de déconnexion par CID : cancel quand l'agent déconnecte.
+    /// La session QUIC correspondante surveille ce token pour fermer
+    /// proprement la connexion client.
+    agent_disconnect_tokens: Arc<std::sync::Mutex<std::collections::HashMap<u32, CancellationToken>>>,
+
     /// Token de shutdown global du service (au moment où le proxy s'arrête).
     _shutdown: CancellationToken,
 
@@ -195,6 +200,8 @@ impl VsockService {
         // Construire le service.
         let cid_input_rxs = capturer.cid_input_rxs();
         let cid_input_txs = capturer.cid_input_txs();
+        let agent_disconnect_tokens: Arc<std::sync::Mutex<std::collections::HashMap<u32, CancellationToken>>> =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 
         let service = Arc::new(VsockService {
             agent_caps,
@@ -203,6 +210,7 @@ impl VsockService {
             inputs_tx,
             cid_input_rxs,
             cid_input_txs,
+            agent_disconnect_tokens,
             _shutdown: shutdown,
             _capturer_handle: cap_handle,
             _fanout_handle: fanout_handle,
@@ -315,6 +323,22 @@ impl VsockService {
     /// Récupère le sender d'inputs pour un CID (lookup, pas de création).
     pub fn get_input_tx_for_cid(&self, cid: u32) -> Option<mpsc::Sender<Vec<u8>>> {
         self.cid_input_txs.lock().unwrap().get(&cid).cloned()
+    }
+
+    /// Crée un CancellationToken pour un CID donné. La session QUIC
+    /// surveille ce token ; il est cancel quand l'agent déconnecte.
+    pub fn subscribe_agent_disconnect(&self, cid: u32) -> CancellationToken {
+        let token = CancellationToken::new();
+        self.agent_disconnect_tokens.lock().unwrap().insert(cid, token.clone());
+        token
+    }
+
+    /// Signale la déconnexion d'un agent pour un CID donné.
+    /// Appelé par le VsockCapturer quand run_session() se termine.
+    pub fn notify_agent_disconnect(&self, cid: u32) {
+        if let Some(token) = self.agent_disconnect_tokens.lock().unwrap().remove(&cid) {
+            token.cancel();
+        }
     }
 
     /// S'abonne au flux de frames pour une nouvelle session cliente.

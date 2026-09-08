@@ -789,6 +789,23 @@ impl QuicServer {
             tracing::info!(injected = injector.injected_count(), "réception d'inputs terminée");
         });
 
+        // Token de déconnexion agent : cancel quand l'agent vsock
+        // de ce CID se déconnecte. Permet de fermer la session QUIC
+        // au lieu de laisser le client avec un écran figé.
+        #[cfg(feature = "vsock-source")]
+        let agent_disconnect = {
+            if config.capture.backend == "vsock" {
+                session_cid.and_then(|cid| {
+                    crate::capture::vsock_service::VsockService::get()
+                        .map(|svc| svc.subscribe_agent_disconnect(cid))
+                })
+            } else {
+                None
+            }
+        };
+        #[cfg(not(feature = "vsock-source"))]
+        let agent_disconnect: Option<tokio_util::sync::CancellationToken> = None;
+
         info!(session_id = %session_id, "pipeline démarré — streaming vidéo");
         let mut frames_encrypted: u64 = 0;
         let mut frames_total: u64 = 0;
@@ -803,6 +820,19 @@ impl QuicServer {
                 }
                 _ = conn.closed() => {
                     info!(session_id = %session_id, "client déconnecté");
+                    session_shutdown.cancel();
+                    break;
+                }
+                // Agent vsock déconnecté (VM détruite, crash, etc.)
+                // → fermer la session QUIC pour que le client ne reste
+                // pas avec un écran figé.
+                _ = async {
+                    match &agent_disconnect {
+                        Some(token) => token.cancelled().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    warn!(session_id = %session_id, "agent vsock déconnecté — fermeture session");
                     session_shutdown.cancel();
                     break;
                 }
