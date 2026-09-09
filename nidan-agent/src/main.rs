@@ -256,7 +256,7 @@ async fn main() -> anyhow::Result<()> {
                     // et l'injecter via RemoteDesktop.
                     #[cfg(feature = "remotedesktop-input")]
                     {
-                        let Some(ref inj_arc) = injector_task else {
+                        let Some(ref inj_arc) = _injector_task else {
                             tracing::debug!("InputBatch reçu mais aucun injecteur (mode non-wayland)");
                             continue;
                         };
