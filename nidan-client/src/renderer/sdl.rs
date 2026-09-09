@@ -265,15 +265,10 @@ fn run_sdl2_real(
 
     info!("SDL2 boucle terminée — arrêt dans 500ms");
     std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        // Envoyer SIGINT à soi-même — déclenche le même chemin
-        // que Ctrl+C (conn.close → broker libère la VM).
-        let pid = std::process::id();
-        let _ = std::process::Command::new("kill")
-            .args(["-s", "INT", &pid.to_string()])
-            .output();
-        // Sécurité : si le signal ne suffit pas
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Laisser 200ms au runtime tokio pour le cleanup
+        // (conn.close via conn.closed() dans le select).
+        // Le proxy gère le nettoyage VM à la déconnexion QUIC.
+        std::thread::sleep(std::time::Duration::from_millis(200));
         std::process::exit(0);
     });
     Ok(())
