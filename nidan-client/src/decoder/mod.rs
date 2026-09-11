@@ -198,9 +198,22 @@ impl DecoderPipeline {
                     "frame décodée"
                 );
 
-                if tx_decoded.blocking_send(decoded).is_err() {
-                    info!("channel renderer fermé, arrêt décodeur");
-                    break;
+                // try_send au lieu de blocking_send : si le renderer SDL2
+                // est en retard (canvas.present lent), on drop la frame
+                // au lieu de bloquer. Sinon deadlock : le select loop est
+                // à la fois producteur (tx_dec_in) et consommateur
+                // (rx_dec_out) du décodeur — bloquer ici empêche le select
+                // de lire la sortie → deadlock.
+                match tx_decoded.try_send(decoded) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        info!("channel renderer fermé, arrêt décodeur");
+                        break;
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        frames_dropped += 1;
+                        debug!("frame droppée (renderer en retard)");
+                    }
                 }
 
                 frames_decoded += 1;

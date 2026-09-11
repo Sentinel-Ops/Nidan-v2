@@ -415,6 +415,8 @@ async fn run_session(
                         // son cycle périodique (keyframe_interval, ~toutes les
                         // 20 frames par défaut), produisant un flux IDR+P normal.
                         let is_keyframe = frames_recv == 0;
+                        if frames_recv < 5 || frames_recv % 30 == 0 {
+                        }
                         let raw = RawFrame {
                             data:         proto_frame.pixels,
                             width:        proto_frame.width,
