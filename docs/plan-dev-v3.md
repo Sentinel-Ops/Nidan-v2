@@ -9,8 +9,9 @@ référence commune et de trace des choix.
 KVM/libvirt, pool dynamique), plan v3 (industrialisation, innovation,
 fonctionnel).
 
-**État au 4 septembre 2026 :** v0.9.0-warm-pool — pool chaud,
-GC orphelines, quotas, 15 fichiers, +630 lignes.
+**État au 11 septembre 2026 :** v0.9.3 — pool chaud,
+GC orphelines, quotas, fix deadlock décodeur, fix agent disconnect,
+fix segfault SDL2. Session stable 3+ minutes sans crash.
 
 ## Principes directeurs
 
@@ -39,8 +40,8 @@ message décrivant l'intention (`feat:`, `docs:`, `chore:`).
 | 9 | Innovation thèse IDPE (C2-E)                           | Firewall sémantique, capacités CID, IMA/EVM         | 3 à 5 jours     |
 | 10 | Fonctionnel avancé                                    | OIDC/MFA, PKI automatisée, multi-nœud               | 4 à 6 jours     |
 
-**État v0.9.0** : étapes 1-7 terminées (4 septembre 2026). Étapes 8-10
-constituent la roadmap v3.
+**État v0.9.3** : étapes 1-7 terminées + stabilisation post-pool-chaud
+(4-11 septembre 2026). Étapes 8-10 constituent la roadmap v3.
 
 Estimation totale initiale : **4 à 5 jours de développement effectif**, hors
 allers-retours de validation en environnement réel. L'étape 6 s'est étendue
@@ -943,6 +944,56 @@ Preuve : [tag v0.7.1-etape6i-multisession-inputs](https://github.com/Sentinel-Op
   `cleanup_orphans(skip_grace)` → `replenish()` → écoute QUIC.
   3 clients simultanés, assignation < 1 s, destruction automatique
   à la fermeture de la fenêtre.
+
+
+- **Étape 7, v0.9.1 — Fix agent disconnect (fait, 8 septembre)** :
+  quand l'agent vsock se déconnecte (VM détruite par le GC, crash),
+  le proxy ne fermait pas la connexion QUIC → le client restait avec
+  un écran figé indéfiniment. Le VsockCapturer singleton ne ferme pas
+  le `frames_tx` mpsc quand un agent déconnecte → le fan-out/broadcast
+  restent en attente → le décodeur attend des frames → la boucle QUIC
+  ne break jamais.
+  * `agent_disconnect_tokens: HashMap<CID, CancellationToken>` dans
+    le VsockService
+  * `notify_agent_disconnect(cid)` appelé après `run_session()` dans
+    le VsockCapturer
+  * Branche `agent_disconnect` dans le `select!` du streaming proxy
+  * TTL JWT passé de 180s à 28800s (8h) pour éviter que le GC ne
+    détruise les VMs en cours d'utilisation
+
+- **Étape 7, v0.9.2 — Fix segfault SDL2 client (fait, 9 septembre)** :
+  le SIGINT envoyé par le thread de fermeture SDL arrivait pendant
+  l'exécution des destructeurs SDL2 (`SDL_DestroyRenderer`,
+  `SDL_DestroyWindow`, `SDL_Quit`) → segfault. Avec le fix v0.9.1
+  (agent_disconnect), le proxy ferme lui-même la connexion QUIC — le
+  SIGINT est devenu redondant. Remplacement par `exit(0)` après 200ms.
+
+- **Étape 7, Fix typo agent (fait, 9 septembre)** :
+  `injector_task` → `_injector_task` dans `nidan-agent/src/main.rs`.
+  Bug de compilation visible uniquement avec `--features remotedesktop-input`.
+
+- **Étape 7, Fix deadlock décodeur client (fait, 11 septembre)** :
+  le client crashait avec "timeout (5s) envoi frame au décodeur" après
+  ~30-60 secondes d'utilisation. Deadlock producteur/consommateur : le
+  `select!` loop est à la fois producteur (`tx_dec_in.send`) et
+  consommateur (`rx_dec_out.recv`) du décodeur. Quand `canvas.present()`
+  (rendu software, pas de GPU) ralentit → le channel decoded se remplit
+  → `blocking_send()` dans le décodeur bloque → le channel d'entrée se
+  remplit → le select loop bloque sur le send avec timeout 5s → crash.
+  Diagnostic confirmé par comparaison stub vs SDL2 : le stub (sans
+  `canvas.present()`) ne deadlock jamais.
+  * `blocking_send()` remplacé par `try_send()` dans
+    `nidan-client/src/decoder/mod.rs`
+  * Si le renderer ne suit pas, le décodeur drop la frame au lieu de
+    bloquer (comportement standard de tout lecteur vidéo temps réel)
+  * Le renderer SDL2 n'affiche de toute façon que la dernière frame
+    disponible (`try_recv` en boucle, seule la plus récente est gardée)
+  * Session testée 3m30 stable, 2187 decoded / 1178 dropped, zéro crash
+
+- **Étape 7, v0.9.3 (à tagger)** :
+  stabilisation post-pool-chaud. Tous les composants compilent et
+  fonctionnent ensemble. Pas de régression. Prêt pour l'étape 8
+  (industrialisation).
 
 ---
 
