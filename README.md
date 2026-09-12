@@ -30,7 +30,7 @@ secret des affaires (Code de la propriété intellectuelle, Code de commerce).
 Tout usage nécessite une autorisation écrite préalable du titulaire.
 
 Copyright (c) 2024-2026 Sentinel Ops. Voir [LICENSE](LICENSE).
-Contact : contact@sentinel-ops.fr
+Contact : jubenotjp@protonmail.com
 
 
 ## Pourquoi une v2
