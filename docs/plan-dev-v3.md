@@ -1080,7 +1080,151 @@ Guide de déploiement pour l'infrastructure cible (Dell R440 ou
 - `docs/DEPLOIEMENT-KVM.md`
 - `docs/TROUBLESHOOTING.md`
 
-### 8.4 — Release v1.0.0
+### 8.4 — Réseau et isolation IP des VMs
+
+Les VMs clonées depuis le template héritent de la même IP statique,
+ce qui provoque des conflits réseau avec le pool chaud (plusieurs
+VMs actives simultanément).
+
+**Attribution IP dynamique par CID :**
+
+Chaque VM du pool reçoit une IP dérivée de son CID vsock :
+
+```
+IP = 192.168.122.{CID}
+```
+
+Le provisionnement doit :
+
+- Injecter un script firstboot dans le template (ou cloud-init
+  NoCloud) qui configure l'IP en fonction du CID vsock attribué
+  par le broker via `set_vsock_cid`
+- Utiliser une plage IP cohérente avec la plage CID
+  (ex. CID 10-99 → IP 192.168.122.10-99)
+- Configurer le hostname dynamiquement (`nidan-{clone_id}`)
+
+**NAT et POSTROUTING :**
+
+Les VMs ne doivent pas être exposées directement sur le LAN.
+Le socle fait office de passerelle NAT (masquerade) :
+
+```
+┌────────────┐      bridge virbr0         ┌────────────┐
+│  VM CID 10 │──── 192.168.122.10 ────────│            │
+│  VM CID 11 │──── 192.168.122.11 ────────│   SOCLE    │
+│  VM CID 12 │──── 192.168.122.12 ────────│            │
+└────────────┘                            │  iptables  │
+                                          │ POSTROUTING│
+                                          │ MASQUERADE │
+                                          │            │
+                                          │  eth0 (LAN)│
+                                          │ 192.168.8.X│
+                                          └────────────┘
+```
+
+Configuration iptables sur le socle :
+
+```bash
+# NAT sortant — les VMs accèdent au LAN/internet via l'IP du socle
+iptables -t nat -A POSTROUTING -s 192.168.122.0/24 \
+  -o eth0 -j MASQUERADE
+
+# Autoriser le forwarding
+iptables -A FORWARD -i virbr0 -o eth0 -j ACCEPT
+iptables -A FORWARD -i eth0 -o virbr0 \
+  -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+# Bloquer le trafic inter-VMs (isolation)
+iptables -A FORWARD -i virbr0 -o virbr0 -j DROP
+```
+
+En environnement classifié (pas d'accès internet), le NAT est
+désactivé et seul le canal vsock reste opérationnel.
+
+**Livrables :**
+
+- Script `deploy/configure-network.sh`
+- Template firstboot avec IP par CID
+- Documentation dans `docs/DEPLOIEMENT-KVM.md` section réseau
+
+### 8.5 — Durcissement des binaires (socle et VM broker)
+
+Les binaires NIDAN tournent sur le socle (zone de confiance) et
+dans la VM broker. Ils doivent être durcis pour limiter l'impact
+d'une éventuelle compromission.
+
+**Seccomp (filtrage syscalls) :**
+
+Chaque binaire dispose d'un profil seccomp restrictif qui ne
+conserve que les syscalls nécessaires :
+
+| Binaire | Syscalls autorisés (catégories) |
+|---------|-------------------------------|
+| `nidan-host-agent` | socket (vsock, AF_LOCAL), libvirt (ioctl), fork/exec (qemu-img), read/write/stat |
+| `nidan-proxy-encoder` | socket (vsock, UDP/QUIC), mmap (encodage), read/write, futex (tokio) |
+| `nidan-broker` | socket (UDP/QUIC, vsock), read/write, futex (tokio) |
+
+Implémentation : profils seccomp-bpf intégrés dans chaque binaire
+via le crate `seccompiler` (Firecracker) ou `libseccomp-rs`.
+Activation au démarrage, après initialisation.
+
+**AppArmor (confinement filesystem + réseau) :**
+
+Profils AppArmor par binaire limitant :
+
+- Accès filesystem : lecture seule sauf répertoires de travail
+  explicites (`/var/lib/nidan/`, `/run/nidan/`)
+- Accès réseau : ports spécifiques uniquement
+- Exécution : deny exec sauf les binaires autorisés (qemu-img
+  pour host-agent)
+- Capabilities : deny_all sauf les capacités requises
+  (`CAP_NET_BIND_SERVICE` pour le proxy)
+
+```
+# Exemple : /etc/apparmor.d/nidan-proxy-encoder
+/opt/nidan/nidan-proxy-encoder {
+  # Réseau
+  network inet dgram,           # QUIC (UDP)
+  network vsock stream,         # vsock capture
+
+  # Filesystem
+  /etc/nidan/** r,              # config
+  /opt/nidan/** r,              # binaire
+  /var/lib/nidan/quarantine/** rw,  # sas de fichiers
+
+  # Deny explicites
+  deny /proc/*/mem rw,
+  deny /sys/** w,
+  deny /dev/** rw,
+}
+```
+
+**Compilation durcie :**
+
+Vérifier que les flags de compilation sont activés :
+
+```toml
+# .cargo/config.toml
+[build]
+rustflags = [
+  "-C", "relocation-model=pic",     # PIE
+  "-C", "link-arg=-z,relro",        # Full RELRO
+  "-C", "link-arg=-z,now",          # Bind now
+  "-C", "link-arg=-z,noexecstack",  # NX stack
+]
+```
+
+Vérification avec `checksec` sur chaque binaire.
+
+**Livrables :**
+
+- Profils seccomp par binaire dans `deploy/seccomp/`
+- Profils AppArmor dans `deploy/apparmor/`
+- `.cargo/config.toml` avec rustflags durcis
+- Script `deploy/verify-hardening.sh` (checksec + profils)
+- Documentation dans `docs/HARDENING.md`
+
+### 8.6 — Release v1.0.0
 
 Critères de passage :
 
@@ -1253,12 +1397,67 @@ Evaluation) :
 - Matrice de couverture des exigences vs implémentation
 - Rapport de test de conformité
 
+
+### 9.5 — Crypto post-quantique (PQC) hybride
+
+L'ANSSI a annoncé en juin 2026 (France Quantum) qu'à partir de
+2027, les produits de sécurité dépourvus de mécanismes résistants
+au quantique ne seront plus certifiables (visa de sécurité, CSPN,
+Critères Communs). La doctrine reste l'hybridation : classique
+éprouvé + post-quantique.
+
+**Inventaire crypto NIDAN et plan de migration :**
+
+| Composant | Algo actuel | Migration PQC | Priorité |
+|-----------|-------------|---------------|----------|
+| KEM QUIC (proxy↔client, broker↔client) | X25519 (via rustls) | X25519MLKEM768 (rustls 0.23.22+, feature `prefer-post-quantum`) | **P0** — seul flux exposé au réseau, vulnérable au *harvest now, decrypt later* |
+| Signature JWT broker→proxy | Ed25519 ou HMAC-SHA256 | Hybride Ed25519 ‖ ML-DSA-44 (champ `alg` versionné) | **P1** — jeton passe de ~300 o à ~4-5 ko |
+| PKI interne (certificats mTLS) | ECDSA / Ed25519 | ML-DSA dans les certificats (`rustls-post-quantum`, feature `aws-lc-rs-unstable`) | **P2** — PKI fermée, pas de contrainte WebPKI |
+| Capacités CID-bound HMAC | HMAC-SHA256 | Inchangé — quantum-safe (Grover ramène à 128 bits) | Aucune action |
+| LUKS2 / AES-256-XTS | AES-256 | Inchangé — quantum-safe | Aucune action |
+| Chiffrement E2E vidéo/inputs | X25519 + ChaCha20-Poly1305 | X25519MLKEM768 + ChaCha20-Poly1305 | **P0** — même KEM que le QUIC |
+
+**Le livrable CSPN :**
+
+Ce que le CESTI attendra n'est pas « j'ai mis du ML-KEM » mais
+la **crypto-agilité** : négociation d'algorithmes versionnée dans
+`nidan-proto`, aucune suite en dur, identifiants d'algo dans le
+JWT et le handshake, plus un **CBOM** (inventaire cryptographique
+exhaustif) avec pour chaque point : algo actuel, durée de vie du
+secret, exposition réseau, plan de migration.
+
+**Implémentation P0 (QUIC + E2E) :**
+
+```rust
+// rustls config avec ML-KEM hybride
+let config = rustls::ClientConfig::builder_with_provider(
+    Arc::new(aws_lc_rs::default_provider())
+)
+.with_safe_default_protocol_versions()?
+.with_root_certificates(root_store)
+.with_client_auth_cert(certs, key)?;
+// X25519MLKEM768 est automatiquement préféré avec aws-lc-rs
+```
+
+Coût : ~1,1 ko de plus dans le ClientHello — négligeable pour
+le modèle NIDAN (un handshake par session, pas du QPS).
+
+**Livrables :**
+
+- Migration rustls vers `aws-lc-rs` + `prefer-post-quantum`
+- CBOM dans `docs/CSPN/CBOM.md`
+- Champ `alg` versionné dans le JWT
+- Tests de négociation PQC client↔proxy
+- Documentation dans `docs/POST-QUANTUM.md`
+
 ### Commits prévus
 
 ```
 feat(host-agent): firewall sémantique XML libvirt
 feat(host-agent): capacités CID-bound (jetons signés HMAC)
 feat(common): attestation mutuelle IMA/EVM
+feat(proxy+broker): migration QUIC post-quantique X25519MLKEM768
+docs: CBOM inventaire cryptographique
 docs: modèle de sécurité NIDAN
 docs: guide configuration IMA/EVM
 docs: cible de sécurité CSPN v2
@@ -1379,6 +1578,106 @@ PipeWire → Opus → QUIC stream dédié.
 **Priorité :** basse — la plupart des cas d'usage OIV/défense
 n'ont pas besoin d'audio sur le bureau distant.
 
+
+### 10.6 — Sas d'échange de fichiers sécurisé
+
+Le besoin de récupérer les fichiers téléchargés depuis la VM est
+une fonctionnalité essentielle. Ce n'est pas un simple transfert
+de fichiers — c'est la construction d'une **passerelle d'importation
+entre deux zones de sensibilité différentes**, au sens du profil
+ANSSI-PG-076 (« Sas et station blanche »).
+
+**Invariant fondamental : le socle ne parse jamais un fichier.**
+
+Les moteurs AV (ClamAV, etc.) sont des agrégats de parsers C
+traitant des données contrôlées par l'attaquant. Les placer sur
+le socle crée un chemin d'escalade directe VM → hyperviseur.
+
+**Architecture : VM sacrificielle éphémère**
+
+```
+┌──────────────┐    ┌────────────────────────┐   ┌─────────────┐
+│  VM desktop  │    │   VM SAS (jetable)     │   │   SOCLE     │
+│ (non fiable) │    │   (sacrificielle)      │   │ (confiance) │
+│              │    │                        │   │             │
+│  ~/Downloads │    │ • terminaison WebDAV   │   │ • host-agent│
+│      │       │    │ • détection type réelle│   │ • orchestr. │
+│      │       │    │ • AV multi-moteur      │   │ • journal   │
+│      │       │    │ • statification / CDR  │   │   scellé    │
+│      │       │    │ • re-sérialisation     │   │ • proxy-enc │
+└──────┼───────┘    └───────────┬────────────┘   └──────┬──────┘
+       │                        │                       │
+       └─── WebDAV / vsock ─────┘                       │
+                                └── proto TLV minimal ──┘
+                                    (fichier reconstruit
+                                     + verdict scellé)
+```
+
+**Principes :**
+
+- **VM sas one-shot** — clone par fichier, détruite après traitement.
+  Avec thin clone qcow2, le coût est ~1 seconde. Conformité FS5/FS14
+  maximale.
+- **WebDAV dans la VM sas** — pas sur le socle (parser HTTP = code
+  non fiable). L'UX reste excellente : montage gvfs natif dans la VM
+  desktop.
+- **Proto TLV minimal** sur le franchissement vers la zone de
+  confiance — parser de quelques dizaines de lignes, auditable.
+- **Statification porte la sécurité** — l'AV est un filet
+  secondaire par signatures (contournable). La statification (CDR)
+  est structurelle et indépendante de la menace.
+
+**Pipeline de traitement dans la VM sas :**
+
+1. Identification type réel (magic bytes, pas extension) → rejet
+   si mismatch
+2. Contrôles structurels (taille, profondeur, ratio décompression)
+3. Décompression récursive bornée
+4. AV multi-moteur (≥2, chacun cloisonné seccomp/bwrap dans la VM)
+5. Règles YARA (signatures métier)
+6. Statification / CDR (indépendant du verdict AV)
+7. Verdict + scellement HMAC (lié au CID)
+
+**Pistes d'innovation (volet thèse 9-F) :**
+
+- **Content Threat Removal (CTR)** — extraction de l'information
+  métier, re-sérialisation dans un fichier entièrement neuf. Aucun
+  octet original ne traverse.
+- **LangSec / parsers formellement vérifiés** — EverParse (F*/Low*)
+  pour définir un sous-ensemble strict des formats (PDF/NIDAN,
+  OOXML/NIDAN). Logique de grammaire close au lieu de liste noire.
+  Même patron que le firewall sémantique XML (étape 9.1) →
+  **contribution thèse unifiée** : « validation sémantique en
+  coupure sur canal vsock avec attestation ».
+- **Diode logicielle** — flux unidirectionnel structurel entre
+  VM desktop → VM sas → socle (cf. hairgap/CEA). Conformité FS13.
+- **Attestation VM sas** — IMA/EVM (étape 9.3) étendu : la VM sas
+  atteste son état avant traitement, le verdict est scellé par une
+  clé liée à l'attestation.
+
+**Asymétrie des flux :**
+
+| Direction | Menace | Contrôle dominant |
+|-----------|--------|-------------------|
+| Internet → VM → client | Code malveillant | Statification, AV, grammaire close |
+| Client → VM → Internet | Exfiltration | Séquestre hashes, quotas, DLP |
+
+La politique est un **paramètre de déploiement** : profil Standard
+(DR/II 901, internet) vs profil CoCo (Secret/IGI 1300, pas
+d'internet — sens sortant dominant).
+
+**Référentiel :** ANSSI-PG-076 v1.0 (menaces M1-M7, fonctions
+FS1-FS14). Directement réutilisable dans la cible de sécurité CSPN.
+
+**Sous-étapes :**
+
+| Étape | Contenu |
+|-------|---------|
+| 10-F1 | Canal de transport : template VM sas, WebDAV in-VM, proto vsock TLV |
+| 10-F2 | Sas de base : identification type, AV multi-moteur cloisonné, verdicts, journalisation |
+| 10-F3 | Statification : CDR par format, modes strict/standard, bidirectionnel |
+| 9-F | Volet thèse : grammaire close EverParse, attestation VM sas, unification firewall sémantique |
+
 ### Commits prévus
 
 ```
@@ -1388,6 +1687,9 @@ feat(broker): révocation OCSP temps réel
 feat(broker): multi-nœud — transport TLS pour host-agents distants
 feat(proxy): presse-papier — filtrage MIME + journalisation
 feat(proxy+agent): audio PipeWire → Opus → QUIC
+feat(proxy): sas de fichiers — VM sacrificielle + pipeline de scan
+feat(proxy): statification CDR par format
+feat(agent): surveillance outbox inotify + transfert vsock
 ```
 
 ---
@@ -1410,10 +1712,19 @@ Novembre 2026 :
   ├─ 9.4 Dossier CSPN
   └─ 10.1 OIDC / MFA
 
-Décembre 2026+ :
+Décembre 2026 :
   ├─ 10.2 PKI automatisée
   ├─ 10.3 Multi-nœud
   └─ 10.4-10.5 Presse-papier sécurisé, audio
+
+Janvier 2027 :
+  ├─ 9.5 Migration PQC hybride (P0: QUIC + E2E)
+  ├─ 10-F1/F2 Sas de fichiers (canal + scan de base)
+  └─ 10-F3 Statification CDR
+
+Février 2027+ :
+  ├─ 9-F Grammaire close EverParse (volet thèse)
+  └─ Soumission dossier CSPN
 ```
 
 Les étapes 9.x (thèse IDPE) et 8.x (industrialisation) avancent en
