@@ -4,6 +4,34 @@
 > v2 = refonte pour le modèle de menace **navigateur en quarantaine** :
 > l'utilisateur navigue sur Internet depuis une VM potentiellement compromise,
 > sans que le poste client puisse être atteint.
+## Licence
+
+⚠️ **Licence propriétaire — Tous droits réservés**
+
+Ce dépôt et son contenu sont protégés par le droit d'auteur et le
+secret des affaires (Code de la propriété intellectuelle, Code de commerce).
+
+| Protection | Périmètre |
+|---|---|
+| 🔒 Code source | Rust, scripts, configuration, tests, Protobuf |
+| 🔒 Architecture | Protocoles (vsock, QUIC, E2E), flux de données, mécanismes de sécurité |
+| 🔒 Documentation | Spécifications, plans de développement, modèles de menace |
+
+| Interdictions |
+|---|
+| ❌ Copie et reproduction |
+| ❌ Modification et œuvres dérivées |
+| ❌ Redistribution (source, binaire, SaaS, conteneur) |
+| ❌ Usage commercial |
+| ❌ Ingénierie inverse et analyse concurrentielle |
+| ❌ Extraction de schémas d'architecture ou de protocoles |
+| ❌ Divulgation à des tiers |
+
+Tout usage nécessite une autorisation écrite préalable du titulaire.
+
+Copyright (c) 2024-2026 Sentinel Ops. Voir [LICENSE](LICENSE).
+Contact : contact@sentinel-ops.fr
+
 
 ## Pourquoi une v2
 
@@ -240,7 +268,3 @@ Chantiers en cours :
   SSTIC 2022 (CEA-SEC).
 - [cea-sec/sanzu](https://github.com/cea-sec/sanzu) — l'implémentation
   originale du modèle.
-
-## Licence
-
-GPL-3.0 — voir [LICENSE](LICENSE).
