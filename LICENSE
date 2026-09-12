@@ -1,0 +1,227 @@
+NIDAN — LICENCE PROPRIÉTAIRE
+=============================
+
+Copyright (c) 2024-2026 Sentinel Ops / Jo MUSIC
+Tous droits réservés — All rights reserved.
+
+Date d'entrée en vigueur : rétroactive au premier commit des
+dépôts Sentinel-Ops/Nidan (v1) et Sentinel-Ops/Nidan-v2 (v2),
+soit respectivement leurs dates de création sur GitHub.
+
+---
+
+1. DÉFINITIONS
+
+1.1. « Logiciel » désigne l'ensemble du code source, du code objet,
+des bibliothèques, des modules, des scripts, des fichiers de
+configuration, des protocoles, des schémas d'architecture, de la
+documentation technique et fonctionnelle, des fichiers de spécification
+(Protobuf, TOML, YAML), des tests, des outils de déploiement et de
+tout autre élément constitutif des projets connus sous le nom de
+NIDAN v1 (dépôt Sentinel-Ops/Nidan) et NIDAN v2 (dépôt
+Sentinel-Ops/Nidan-v2), en toute version passée, présente ou future.
+
+1.2. « Architecture » désigne la conception technique, les choix
+d'architecture logicielle, les diagrammes, les flux de données, les
+protocoles de communication (vsock, QUIC, mTLS, E2E), les mécanismes
+de sécurité (firewall sémantique, capacités CID-bound, attestation
+IMA/EVM, sas de fichiers, chiffrement post-quantique hybride), les
+modèles de déploiement et tout savoir-faire technique documenté ou
+implémenté dans le Logiciel.
+
+1.3. « Titulaire » désigne Sentinel Ops et/ou Jo, personne
+physique, auteur et créateur du Logiciel.
+
+1.4. « Utilisateur » désigne toute personne physique ou morale ayant
+accès au Logiciel, que cet accès soit autorisé ou non.
+
+---
+
+2. DROITS DE PROPRIÉTÉ INTELLECTUELLE
+
+2.1. Le Logiciel et l'Architecture sont la propriété exclusive du
+Titulaire. Ils sont protégés par le droit d'auteur (Code de la
+propriété intellectuelle, articles L.111-1 et suivants), le droit
+des bases de données, le secret des affaires (articles L.151-1 et
+suivants du Code de commerce) et, le cas échéant, par le droit des
+brevets.
+
+2.2. La présente licence couvre rétroactivement l'intégralité des
+contributions au Logiciel depuis le premier commit effectué sur les
+dépôts Sentinel-Ops/Nidan et Sentinel-Ops/Nidan-v2, quelle que
+soit la date de publication de la présente licence.
+
+2.3. L'absence de mention de licence sur un fichier, un commit ou
+une version antérieure du Logiciel ne constitue en aucun cas une
+renonciation aux droits du Titulaire ni une mise dans le domaine
+public. Tout contenu est présumé soumis à la présente licence sauf
+accord écrit contraire du Titulaire.
+
+---
+
+3. INTERDICTIONS
+
+Sauf autorisation écrite préalable et expresse du Titulaire, il est
+strictement interdit de :
+
+3.1. **Copier** — reproduire, dupliquer, cloner ou télécharger tout
+ou partie du Logiciel, du code source, de la documentation ou de
+l'Architecture, par quelque moyen que ce soit.
+
+3.2. **Modifier** — adapter, transformer, traduire, désassembler,
+décompiler, effectuer de l'ingénierie inverse (reverse engineering)
+ou créer des œuvres dérivées du Logiciel ou de l'Architecture.
+
+3.3. **Redistribuer** — publier, distribuer, transmettre, partager,
+mettre à disposition de tiers, sous quelque forme que ce soit
+(source, binaire, SaaS, conteneur, image VM, API), le Logiciel ou
+toute partie de celui-ci.
+
+3.4. **Commercialiser** — vendre, louer, concéder sous licence,
+sous-licencier, offrir en tant que service (SaaS/PaaS), intégrer
+dans un produit commercial ou exploiter économiquement le Logiciel
+ou l'Architecture.
+
+3.5. **Analyser** — procéder à l'analyse statique ou dynamique du
+code, au profilage, au benchmarking comparatif, à l'extraction de
+schémas d'architecture ou de protocoles, dans le but de reproduire
+les fonctionnalités ou l'architecture du Logiciel dans un autre
+produit.
+
+3.6. **Utiliser à des fins concurrentielles** — utiliser le Logiciel,
+sa documentation ou son Architecture pour développer, améliorer ou
+commercialiser un produit concurrent, directement ou indirectement.
+
+3.7. **Divulguer** — révéler, publier ou communiquer à des tiers
+toute information relative au fonctionnement interne, à
+l'architecture, aux algorithmes, aux protocoles ou aux mécanismes
+de sécurité du Logiciel, sauf dans le cadre d'une évaluation de
+sécurité autorisée par le Titulaire (CSPN, audit mandaté).
+
+---
+
+4. ACCÈS AU DÉPÔT
+
+4.1. L'accès au dépôt privé Sentinel-Ops/Nidan-v2 est accordé à
+titre personnel, non transférable et révocable à tout moment par
+le Titulaire.
+
+4.2. Toute personne ayant accès au dépôt — collaborateur, stagiaire,
+prestataire, évaluateur, contributeur — est soumise à la présente
+licence et, le cas échéant, à un accord de confidentialité (NDA)
+complémentaire.
+
+4.3. La révocation de l'accès au dépôt entraîne l'obligation
+immédiate de détruire toute copie locale du Logiciel et de certifier
+par écrit cette destruction.
+
+---
+
+5. CONTRIBUTIONS
+
+5.1. Toute contribution (pull request, patch, commit, suggestion,
+rapport de bug, documentation) soumise au Logiciel est
+automatiquement cédée au Titulaire de manière exclusive, irrévocable,
+mondiale et pour toute la durée de protection légale.
+
+5.2. Le contributeur renonce expressément à tout droit moral de
+paternité sur sa contribution dans la mesure permise par la loi
+applicable, et reconnaît que le Titulaire peut utiliser, modifier,
+intégrer ou supprimer la contribution sans attribution.
+
+5.3. En cas d'impossibilité légale de cession (certaines
+juridictions), le contributeur accorde au Titulaire une licence
+exclusive, irrévocable, mondiale, gratuite et perpétuelle sur sa
+contribution, avec droit de sous-licence.
+
+---
+
+6. ÉVALUATIONS DE SÉCURITÉ
+
+6.1. Le Titulaire peut autoriser par écrit l'accès au code source
+à des fins d'évaluation de sécurité (CSPN ANSSI, audit de
+pénétration, Critères Communs) dans le cadre d'un accord
+spécifique.
+
+6.2. L'évaluateur est tenu à la confidentialité la plus stricte
+sur le code, l'architecture et les résultats de l'évaluation,
+conformément aux règles applicables (IGI 1300, II 901, contrat
+d'évaluation ANSSI).
+
+6.3. L'évaluation ne confère aucun droit d'usage, de reproduction
+ou de redistribution du Logiciel.
+
+---
+
+7. RESPONSABILITÉ ET GARANTIE
+
+7.1. LE LOGICIEL EST FOURNI « EN L'ÉTAT » (AS IS), SANS GARANTIE
+D'AUCUNE SORTE, EXPRESSE OU IMPLICITE, Y COMPRIS, SANS S'Y LIMITER,
+LES GARANTIES DE QUALITÉ MARCHANDE, D'ADÉQUATION À UN USAGE
+PARTICULIER ET D'ABSENCE DE CONTREFAÇON.
+
+7.2. EN AUCUN CAS LE TITULAIRE NE POURRA ÊTRE TENU RESPONSABLE DE
+TOUT DOMMAGE DIRECT, INDIRECT, ACCESSOIRE, SPÉCIAL, EXEMPLAIRE OU
+CONSÉCUTIF (Y COMPRIS, SANS S'Y LIMITER, LA PERTE DE DONNÉES,
+L'INTERRUPTION D'ACTIVITÉ OU LA PERTE DE PROFITS) DÉCOULANT DE
+L'UTILISATION OU DE L'IMPOSSIBILITÉ D'UTILISER LE LOGICIEL.
+
+---
+
+8. SANCTIONS
+
+8.1. Toute violation de la présente licence expose le contrevenant
+à des poursuites judiciaires en contrefaçon (articles L.335-2 et
+suivants du Code de la propriété intellectuelle) et en concurrence
+déloyale (article 1240 du Code civil), ainsi qu'à des dommages et
+intérêts.
+
+8.2. Le Titulaire se réserve le droit de révoquer immédiatement
+tout accès au dépôt et de demander la destruction de toute copie
+en cas de violation constatée ou suspectée.
+
+8.3. En cas d'atteinte au secret des affaires, le Titulaire peut
+exercer les actions prévues aux articles L.152-1 et suivants du
+Code de commerce.
+
+---
+
+9. LOI APPLICABLE ET JURIDICTION
+
+9.1. La présente licence est régie par le droit français.
+
+9.2. Tout litige relatif à l'interprétation, l'exécution ou la
+résiliation de la présente licence sera soumis à la compétence
+exclusive des tribunaux de Nantes (Loire-Atlantique, France).
+
+---
+
+10. DISPOSITIONS GÉNÉRALES
+
+10.1. Si une disposition de la présente licence est jugée invalide
+ou inapplicable, les dispositions restantes conservent leur plein
+effet.
+
+10.2. Le fait pour le Titulaire de ne pas exercer un droit prévu
+par la présente licence ne constitue pas une renonciation à ce
+droit.
+
+10.3. La présente licence constitue l'intégralité de l'accord
+entre le Titulaire et l'Utilisateur concernant le Logiciel. Elle
+remplace tout accord antérieur, oral ou écrit, relatif au même
+objet.
+
+10.4. Toute modification de la présente licence doit être faite
+par écrit et signée par le Titulaire.
+
+---
+
+CONTACT
+
+Pour toute demande de licence commerciale, de partenariat ou
+d'autorisation : contact@sentinel-ops.fr
+
+---
+
+Sentinel Ops — NIDAN
+Sécurité souveraine pour les postes de travail sensibles.
