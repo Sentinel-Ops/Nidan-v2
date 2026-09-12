@@ -1,7 +1,7 @@
 NIDAN — LICENCE PROPRIÉTAIRE
 =============================
 
-Copyright (c) 2024-2026 Sentinel Ops / Jo MUSIC
+Copyright (c) 2024-2026 Sentinel Ops / JUBENOT Jean-Philippe née le 08/12/1987
 Tous droits réservés — All rights reserved.
 
 Date d'entrée en vigueur : rétroactive au premier commit des
@@ -29,7 +29,7 @@ IMA/EVM, sas de fichiers, chiffrement post-quantique hybride), les
 modèles de déploiement et tout savoir-faire technique documenté ou
 implémenté dans le Logiciel.
 
-1.3. « Titulaire » désigne Sentinel Ops et/ou Jo, personne
+1.3. « Titulaire » désigne Sentinel Ops et/ou JUBENOT Jean-Philippe née le 08/12/1987, personne
 physique, auteur et créateur du Logiciel.
 
 1.4. « Utilisateur » désigne toute personne physique ou morale ayant
@@ -46,10 +46,12 @@ des bases de données, le secret des affaires (articles L.151-1 et
 suivants du Code de commerce) et, le cas échéant, par le droit des
 brevets.
 
-2.2. La présente licence couvre rétroactivement l'intégralité des
-contributions au Logiciel depuis le premier commit effectué sur les
-dépôts Sentinel-Ops/Nidan et Sentinel-Ops/Nidan-v2, quelle que
-soit la date de publication de la présente licence.
+2.2. Conformément aux articles L.111-1 et L.112-2 du Code de la
+propriété intellectuelle, le Logiciel est protégé par le droit
+d'auteur depuis sa création, soit depuis le premier commit
+effectué sur les dépôts Sentinel-Ops/Nidan et Sentinel-Ops/Nidan-v2.
+La présente licence formalise et rappelle cette protection
+préexistante — elle ne la crée pas.
 
 2.3. L'absence de mention de licence sur un fichier, un commit ou
 une version antérieure du Logiciel ne constitue en aucun cas une
